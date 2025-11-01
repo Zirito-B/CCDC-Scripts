@@ -26,19 +26,35 @@ echo "[*] Changing OS user passwords (root, sysadmin)..."
 echo "root:$NEW_ROOT_PASS" | chpasswd
 echo "sysadmin:$NEW_SYSADMIN_PASS" | chpasswd
 
-# 2. Clear Common Persistence Locations
-echo "[*] Clearing potential persistence locations (crontab, authorized_keys)..."
+# 2. NUKE ALL CRON JOBS & PERSISTENCE
+echo "[*] Nuking all known cron job and persistence locations..."
+# Clear system-wide crontab and cron directories
 echo "" > /etc/crontab
-crontab -r # Clear root's crontab
+rm -rf /etc/cron.d/*
+rm -rf /etc/cron.hourly/*
+rm -rf /etc/cron.daily/*
+rm -rf /etc/cron.weekly/*
+rm -rf /etc/cron.monthly/*
 
-if [ -f /root/.ssh/authorized_keys ]; then
-    echo "" > /root/.ssh/authorized_keys
-fi
-if [ -f /home/sysadmin/.ssh/authorized_keys ]; then
-    echo "" > /home/sysadmin/.ssh/authorized_keys
-    # Also clear sysadmin's crontab
-    crontab -u sysadmin -r
-fi
+# Clear crontabs for ALL users with a valid shell
+echo "[*] Wiping crontabs for all users..."
+for user in $(cut -f1,7 -d: /etc/passwd | egrep -v '(/bin/false|/sbin/nologin)$' | cut -f1 -d:); do
+    echo "  - Wiping cron for user: $user"
+    crontab -u $user -r 2>/dev/null
+done
+
+# Clear authorized_keys for ALL users
+echo "[*] Wiping authorized_keys for all users..."
+for dir in $(cut -f6 -d: /etc/passwd); do
+    if [ -f "$dir/.ssh/authorized_keys" ]; then
+        echo "  - Wiping authorized_keys in $dir"
+        echo "" > "$dir/.ssh/authorized_keys"
+    fi
+done
+# Explicitly get root and sysadmin, just in case
+echo "" > /root/.ssh/authorized_keys
+echo "" > /home/sysadmin/.ssh/authorized_keys
+
 
 # 3. Reset Splunk Admin Password (Source 268, 493)
 echo "[*] Resetting Splunk 'admin' password to '$NEW_SPLUNK_ADMIN_PASS'..."
@@ -77,7 +93,7 @@ sed -i 's/PermitRootLogin yes/PermitRootLogin no/' /etc/ssh/sshd_config
 echo "[*] Restarting SSH service..."
 systemctl restart sshd
 
-# 6. Create Service 'Babysitter' for Uptime
+# 6. Create Service 'Babysitter' for Uptime (Source 464)
 echo "[*] Creating service 'babysitter' cron job for Splunk uptime..."
 # Create a script for cron to run
 echo '#!/bin/bash' > /root/check_splunk.sh
@@ -86,10 +102,11 @@ echo '  /opt/splunk/bin/splunk start' >> /root/check_splunk.sh
 echo 'fi' >> /root/check_splunk.sh
 chmod +x /root/check_splunk.sh
 
-# Add to root's crontab to run every minute
+# Add *our* new cron job to root's crontab (after we just wiped it)
 (crontab -l 2>/dev/null; echo "* * * * * /root/check_splunk.sh") | crontab -
 
 echo ""
 echo "[*] Splunk hardening script finished!"
-echo "[*] REMINDER: You must now log in as 'sysadmin' and use 'sudo' for root commands."
+echo "[*] All non-essential cron jobs have been nuked."
+echo "[*] REMEMBER: You must now log in as 'sysadmin' and use 'sudo' for root commands."
 echo ""
