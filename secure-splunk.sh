@@ -62,28 +62,38 @@ echo "[*] Resetting Splunk 'admin' password to '$NEW_SPLUNK_ADMIN_PASS'..."
 echo "[*] Restarting Splunk service..."
 /opt/splunk/bin/splunk restart
 
-# 4. Configure Firewall (firewalld for Oracle Linux 9)
+# 4. Configure Firewall (v4 - RELIABLE FIX)
 echo "[*] Configuring firewalld..."
 systemctl enable --now firewalld
-firewall-cmd --permanent --zone=public --set-target=DROP
-firewall-cmd --permanent --zone=public --add-rich-rule='rule protocol value="tcp" ct state is "ESTABLISHED,RELATED" accept'
-firewall-cmd --permanent --zone=public --add-rich-rule='rule protocol value="udp" ct state is "ESTABLISHED,RELATED" accept'
-firewall-cmd --permanent --zone=public --add-interface=lo --set-target=ACCEPT
 
-# Allow ICMP (Ping) from ANY - CCDC Rule 12 (Source 413)
+# 1. Remove the default-allowed services (Source 494)
+echo "[*] Removing default-allowed services (cockpit, dhcpv6-client, ssh)..."
+firewall-cmd --permanent --zone=public --remove-service=cockpit
+firewall-cmd --permanent --zone=public --remove-service=dhcpv6-client
+firewall-cmd --permanent --zone=public --remove-service=ssh
+
+# 2. Add loopback interface to trusted zone for internal comms
+firewall-cmd --permanent --zone=trusted --add-interface=lo
+
+# 3. Add specific ports for Splunk (Scored Service) (Source 268)
+echo "[*] Allowing scored Splunk ports..."
+firewall-cmd --permanent --zone=public --add-port=8000/tcp
+firewall-cmd --permanent --zone=public --add-port=8089/tcp
+firewall-cmd --permanent --zone=public --add-port=9997/tcp
+
+# 4. Add ICMP (Competition Rule) (Source 413)
+echo "[*] Allowing ICMP..."
 firewall-cmd --permanent --zone=public --add-protocol=icmp
 
-# Allow Splunk services from ANY (for scoring engine) (Source 268)
-firewall-cmd --permanent --zone=public --add-port=8000/tcp  # Splunk Web UI
-firewall-cmd --permanent --zone=public --add-port=8089/tcp  # Splunk Management
-firewall-cmd --permanent --zone=public --add-port=9997/tcp  # Splunk Indexing
+# 5. Add SSH *only* from internal networks (Source 268)
+echo "[*] Allowing SSH from internal subnets..."
+firewall-cmd --permanent --zone=public --add-rich-rule='rule family="ipv4" source address="172.20.242.0/24" service name="ssh" accept'
+firewall-cmd --permanent --zone=public --add-rich-rule='rule family="ipv4" source address="172.20.240.0/24" service name="ssh" accept'
 
-# Allow SSH *only* from your internal networks (Source 268)
-firewall-cmd --permanent --zone=public --add-rich-rule='rule family="ipv4" source address="'"$INSIDE_NET_1"'" service name="ssh" accept'
-firewall-cmd --permanent --zone=public --add-rich-rule='rule family="ipv4" source address="'"$INSIDE_NET_2"'" service name="ssh" accept'
-
+# 6. Reload the firewall to apply all changes
 echo "[*] Reloading firewall..."
 firewall-cmd --reload
+echo "[*] Firewall configuration complete."
 
 # 5. Harden SSH Configuration
 echo "[*] Hardening SSH configuration..."
