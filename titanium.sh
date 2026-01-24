@@ -1,94 +1,68 @@
 #!/bin/bash
-# MWCCDC 2026 - TITANIUM LOCKDOWN (INTERACTIVE MODE)
+# MWCCDC 2026 - TITANIUM HYBRID LOCKDOWN (Merged w/ Last Year's Logic)
+# FEATURES: OS User Locking, Splunk Nuking, Wayland Fix, Auditd
 # RUN AS ROOT
 
-echo "!!! STARTING TITANIUM LOCKDOWN PROTOCOL !!!"
+echo "!!! STARTING TITANIUM HYBRID PROTOCOL !!!"
 
 # ==========================================
-# 1. INTERACTIVE INPUT (NO HARDCODING)
+# 1. INTERACTIVE INPUT
 # ==========================================
-
-# 1. Get Subnet
 while true; do
-    read -p "Enter your Blue Team Subnet (e.g., 172.20.240.0/24): " BLUE_SUBNET
-    if [[ "$BLUE_SUBNET" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$ ]]; then
-        break
-    else
-        echo "[!] Invalid CIDR format. Please try again."
-    fi
+    read -p "Enter Blue Team Subnet (e.g., 172.20.240.0/24): " BLUE_SUBNET
+    if [[ "$BLUE_SUBNET" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$ ]]; then break; fi
 done
 
-# 2. Get Password (Hidden & Verified)
 while true; do
-    echo ""
-    read -s -p "Enter NEW Splunk Admin Password: " ADMIN_PASS
-    echo ""
-    read -s -p "Confirm Password: " ADMIN_PASS_CONFIRM
-    echo ""
-    
-    if [ -z "$ADMIN_PASS" ]; then
-        echo "[!] Password cannot be empty."
-    elif [ "$ADMIN_PASS" != "$ADMIN_PASS_CONFIRM" ]; then
-        echo "[!] Passwords do not match! Try again."
-    else
-        echo "[+] Password confirmed."
-        break
-    fi
+    echo ""; read -s -p "Enter NEW Splunk/Root Password: " ADMIN_PASS; echo ""
+    read -s -p "Confirm Password: " ADMIN_PASS_CONFIRM; echo ""
+    if [ "$ADMIN_PASS" == "$ADMIN_PASS_CONFIRM" ] && [ ! -z "$ADMIN_PASS" ]; then break; fi
+    echo "Mismatch. Try again."
 done
 
-echo "----------------------------------------------------"
-echo "Subnet:   $BLUE_SUBNET"
-echo "Password: [HIDDEN]"
-echo "----------------------------------------------------"
-read -p "Press [Enter] to BEGIN LOCKDOWN or Ctrl+C to abort..."
+# ==========================================
+# 2. OS HARDENING (FROM YOUR OLD SCRIPT)
+# ==========================================
+echo "[1] SETTING ROOT PASSWORD..."
+echo "root:$ADMIN_PASS" | chpasswd
 
-# ==========================================
-# 2. SCORCHED EARTH
-# ==========================================
-echo "[1] KILLING HOSTILE CONNECTIONS..."
+echo "[2] KILLING HOSTILE CONNECTIONS..."
 pkill -9 -u $(who | awk '{print $1}' | grep -v "root" | grep -v "$(whoami)")
 
-echo "[2] FLUSHING PERSISTENCE..."
-systemctl stop crond; systemctl mask crond
+echo "[3] FLUSHING PERSISTENCE..."
+echo "" > /etc/crontab
 rm -rf /var/spool/cron/*
-systemctl stop atd; systemctl mask atd
-
-echo "[3] WIPING SSH KEYS..."
-echo > /root/.ssh/authorized_keys
-echo > /home/*/.ssh/authorized_keys 2>/dev/null
+echo "" > /root/.ssh/authorized_keys
+echo "" > /home/*/.ssh/authorized_keys 2>/dev/null
 
 # ==========================================
-# 3. SPLUNK HARDENING
+# 3. SPLUNK NUCLEAR RESET (FROM YOUR OLD SCRIPT)
 # ==========================================
 SPLUNK_HOME="/opt/splunk"
-
-echo "[4] STOPPING SPLUNK SERVICE..."
+echo "[4] STOPPING & CLEANING SPLUNK (FACTORY RESET)..."
 $SPLUNK_HOME/bin/splunk stop
+# This wipes ALL malicious apps/data Red Team might have hid
+$SPLUNK_HOME/bin/splunk clean all -f
 
-echo "[5] APPLYING SPLUNK CONFIGURATION..."
+echo "[5] SEEDING ADMIN USER..."
 mkdir -p $SPLUNK_HOME/etc/system/local
-
-# Nuke old password file if exists (Anti-Race Condition)
-rm -f $SPLUNK_HOME/etc/passwd
-
-# User Seeding
+rm -f $SPLUNK_HOME/etc/passwd # Force reset
 cat > $SPLUNK_HOME/etc/system/local/user-seed.conf <<EOF
 [user_info]
 USERNAME = admin
 PASSWORD = $ADMIN_PASS
 EOF
 
+echo "[6] SECURING SPLUNK CONFIGS..."
 # Web Hardening
 cat > $SPLUNK_HOME/etc/system/local/web.conf <<EOF
 [settings]
 enableSplunkWebSSL = true
 httpport = 8000
 startwebserver = 1
-# Security Kill Switches
 enable_upload_apps = false
 allow_remote_login = false
 EOF
-
 # Server Hardening
 cat > $SPLUNK_HOME/etc/system/local/server.conf <<EOF
 [general]
@@ -98,56 +72,52 @@ pass4SymmKey = changeme
 enableSplunkdSSL = true
 EOF
 
-echo "[6] LOCKING FILES (IMMUTABLE)..."
-# Unlock first just in case
-chattr -i $SPLUNK_HOME/etc/system/local/web.conf 2>/dev/null
-chattr -i $SPLUNK_HOME/etc/system/local/user-seed.conf 2>/dev/null
-
-# Lock
+# ==========================================
+# 4. IMMUTABILITY LOCK (THE "KEY" TO VICTORY)
+# ==========================================
+echo "[7] LOCKING SYSTEM ACCOUNTS (PREVENTS RED TEAM BACKDOOR USERS)..."
+# This was in your old script - VERY GOOD MOVE.
+chattr +i /etc/passwd
+chattr +i /etc/shadow
+chattr +i /opt/splunk/etc/passwd
 chattr +i $SPLUNK_HOME/etc/system/local/web.conf
-chattr +i $SPLUNK_HOME/etc/system/local/user-seed.conf
 
 # ==========================================
-# 4. FIREWALL DOMINANCE
+# 5. FIREWALL (WHITELIST MODE)
 # ==========================================
-echo "[7] CONFIGURING FIREWALL..."
+echo "[8] CONFIGURING FIREWALL..."
 systemctl enable --now firewalld
-firewall-cmd --reload
 firewall-cmd --set-default-zone=drop
-ACTIVE_IFACE=$(ip route | grep default | awk '{print $5}')
-firewall-cmd --zone=drop --change-interface=$ACTIVE_IFACE
-
-# ALLOW SCORING (World Open)
+ACTIVE=$(ip route | grep default | awk '{print $5}')
+firewall-cmd --zone=drop --change-interface=$ACTIVE
 firewall-cmd --zone=drop --add-port=8000/tcp --permanent
-# ALLOW INTERNAL
 firewall-cmd --zone=drop --add-rich-rule="rule family='ipv4' source address='$BLUE_SUBNET' port port='9997' protocol='tcp' accept" --permanent
-firewall-cmd --zone=drop --add-rich-rule="rule family='ipv4' source address='$BLUE_SUBNET' port port='514' protocol='udp' accept" --permanent
 firewall-cmd --zone=drop --add-rich-rule="rule family='ipv4' source address='$BLUE_SUBNET' port port='22' protocol='tcp' accept" --permanent
-# ALLOW LOCAL MGMT
-firewall-cmd --zone=drop --add-rich-rule="rule family='ipv4' source address='127.0.0.1' port port='8089' protocol='tcp' accept" --permanent
-
 firewall-cmd --reload
 
 # ==========================================
-# 5. RESTART & AUDIT
+# 6. STARTUP & AUDIT
 # ==========================================
-echo "[8] RESTARTING SPLUNK..."
+echo "[9] STARTING SPLUNK..."
 $SPLUNK_HOME/bin/splunk start --accept-license --answer-yes --run-as-root
 
-echo "[9] ENABLING AUDIT LOGGING..."
-systemctl enable auditd --now
+echo "[10] ENABLING AUDITD..."
 auditctl -D
 auditctl -a always,exit -F arch=b64 -S execve -k active_monitoring
-auditctl -a always,exit -F arch=b32 -S execve -k active_monitoring
 auditctl -e 2
 
-echo "[10] INSTALLING GUI (BACKGROUND)..."
-(
-    dnf config-manager --enable ol9_appstream ol9_baseos
-    dnf groupinstall -y "Server with GUI"
-    systemctl set-default graphical.target
-    systemctl isolate graphical.target
-) &
+# ==========================================
+# 7. GUI INSTALL (THE FIX FOR BLACK SCREEN)
+# ==========================================
+echo "[11] INSTALLING GUI (FIXED MODE)..."
+# We do NOT run yum update. We ONLY install the GUI.
+dnf config-manager --enable ol9_appstream ol9_baseos
+dnf groupinstall -y "Server with GUI"
 
-echo "!!! LOCKDOWN COMPLETE !!!"
-echo "Admin Password set. GUI installing in background."
+# THE DRIVER FIX (Prevents Black Screen)
+echo "Disabling Wayland to prevent black screen..."
+sed -i 's/#WaylandEnable=false/WaylandEnable=false/' /etc/gdm/custom.conf
+
+systemctl set-default graphical.target
+
+echo "!!! DONE. REBOOT MANUALLY ONLY WHEN DNF FINISHES !!!"
