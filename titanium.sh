@@ -1,249 +1,271 @@
 #!/bin/bash
-set -euo pipefail
+set -u
 
-# MWCCDC "TACTICAL NUKE" SPLUNK + OS LOCKDOWN (NO GUI)
-# Goals:
-# - Do NOT lock you out (keeps current SSH client IP whitelisted automatically)
-# - Keep Splunk Web reachable for scoring (allow ICMP + 8000/tcp from scoring subnet)
-# - Minimize exposed services/ports
-# - Lock down Splunk Web: disable insecure_login endpoint, disable app install, reduce web features
-#
-# Tested intent: RHEL-family (Oracle Linux 9.x etc). Your screenshot shows Oracle Linux Server 9.2.
+# ==============================================================================
+# CCDC 2026: ORACLE LINUX 9 + SPLUNK 10.x HARDENING PROTOCOL
+# "GOD TIER" - NO GUI - CLI ONLY
+# ==============================================================================
+# FEATURES:
+# 1. Oracle 9 Virtualization Fix (Prevents Console Blackout)
+# 2. Splunk 10.x Identity Reset (user-seed.conf + passwd wipe)
+# 3. Splunk App Execution Killswitch (commands.conf/limits.conf)
+# 4. Immutable Persistence Locking (chattr +i)
+# 5. Active Auditd Dashboard (Real-time Alerting)
+# ==============================================================================
 
+LOG="/root/ccdc_lockdown.log"
+BACKUP_DIR="/root/panic_backups"
 SPLUNK_HOME="/opt/splunk"
-LOG="/root/mwccdc_lockdown_$(date +%F_%H%M%S).log"
-exec > >(tee -a "$LOG") 2>&1
+AUDIT_LOG="/var/log/audit/audit.log"
 
-echo "[+] Starting MWCCDC tactical nuke @ $(date)"
-echo "[+] Log: $LOG"
+# ANSI Colors for the Dashboard
+RED='\033${NC} $1" | tee -a "$LOG"; }
+warn() { echo -e "${YELLOW}[!]${NC} $1" | tee -a "$LOG"; }
+alert() { echo -e "${RED}[!!!]${NC} $1" | tee -a "$LOG"; }
 
-if [[ $EUID -ne 0 ]]; then
-  echo "[-] Run as root." >&2
-  exit 1
+if]; then
+   echo "[-] This script must be run as root." 
+   exit 1
 fi
 
-if [[ ! -x "$SPLUNK_HOME/bin/splunk" ]]; then
-  echo "[-] Splunk not found at $SPLUNK_HOME/bin/splunk" >&2
-  exit 1
+echo -e "${RED}"
+echo "   ██████╗ ██╗██████╗ ███████╗"
+echo "   ██╔══██╗██║██╔══██╗██╔════╝"
+echo "   ██████╔╝██║██████╔╝█████╗  "
+echo "   ██╔══██╗██║██╔══██╗██╔══╝  "
+echo "   ██║  ██║██║██║  ██║███████╗"
+echo "   ╚═╝  ╚═╝╚═╝╚═╝  ╚═╝╚══════╝"
+echo "   ORACLE 9 / SPLUNK 10 DEFENSE"
+echo -e "${NC}"
+
+# ==============================================================================
+# 0. INPUTS & ANTI-LOCKOUT
+# ==============================================================================
+warn "Enter the SCORING/BLUE TEAM subnet (e.g., 172.20.240.0/24)."
+warn "If you get this wrong, you block the scoring engine."
+read -p "Subnet: " SCORING_SUBNET
+
+echo ""
+warn "Enter the NEW Splunk Admin Password."
+read -s -p "Password: " SPLUNK_PASS
+echo ""
+
+# Get Current IP to prevent self-lockout
+MY_IP=$(echo $SSH_CLIENT | awk '{print $1}')
+if]; then
+    MY_IP="127.0.0.1" # Fallback if running from console
+fi
+log "Detected your IP as: $MY_IP. Whitelisting this IP to prevent lockout."
+
+# ==============================================================================
+# 1. PANIC BACKUPS
+# ==============================================================================
+log "Creating PANIC BACKUPS..."
+mkdir -p "$BACKUP_DIR"
+tar -czf "$BACKUP_DIR/etc_backup_$(date +%s).tar.gz" /etc/passwd /etc/shadow /etc/ssh /etc/sysconfig/iptables 2>/dev/null
+if; then
+    tar -czf "$BACKUP_DIR/splunk_etc_$(date +%s).tar.gz" "$SPLUNK_HOME/etc" 2>/dev/null
+fi
+log "Backups saved to $BACKUP_DIR."
+
+# ==============================================================================
+# 2. ORACLE LINUX 9 SPECIFIC HARDENING
+# ==============================================================================
+log "Applying Oracle Linux 9 Fixes..."
+
+# FIX 1: Wayland Black Screen of Death
+# Even if you don't use the GUI, if the system tries to boot GDM (default in OL9),
+# it will hang in VMware/Proxmox. This forces X11, saving your console access.
+if [ -f /etc/gdm/custom.conf ]; then
+    sed -i 's/#WaylandEnable=false/WaylandEnable=false/' /etc/gdm/custom.conf
+    # Ensure [daemon] block exists
+    if! grep -q "WaylandEnable=false" /etc/gdm/custom.conf; then
+        echo -e "[daemon]\nWaylandEnable=false" >> /etc/gdm/custom.conf
+    fi
+    log "Wayland disabled (Prevents Console Blackout)."
 fi
 
-# -------------------------
-# 0) INPUTS (Netlab-safe)
-# -------------------------
-while true; do
-  read -r -p "Enter SCORING/BLUE subnet allowed to reach Splunk (example 172.20.240.0/24): " ALLOW_SUBNET
-  if [[ "$ALLOW_SUBNET" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]]; then break; fi
-  echo "Invalid CIDR, try again."
-done
+# FIX 2: Kill Cockpit (Port 9090)
+# Default on OL9. Web-based root shell. Red Team loves this.
+systemctl stop cockpit.socket 2>/dev/null
+systemctl disable cockpit.socket 2>/dev/null
+log "Cockpit (9090) killed and disabled."
 
-# Optional: bind Splunk to a specific IP (the one scoring pings/hits).
-read -r -p "Enter the assigned Splunk IP to bind to (press Enter to SKIP binding): " SPLUNK_BIND_IP
-if [[ -n "${SPLUNK_BIND_IP}" ]]; then
-  if [[ ! "$SPLUNK_BIND_IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
-    echo "Invalid IP format. Exiting." >&2
-    exit 1
-  fi
-fi
+# FIX 3: Kernel Hardening (Sysctl)
+cat > /etc/sysctl.d/99-ccdc-hardening.conf <<EOF
+# Prevent IP Spoofing
+net.ipv4.conf.all.rp_filter = 1
+net.ipv4.conf.default.rp_filter = 1
+# Disable IP Forwarding (We are not a router)
+net.ipv4.ip_forward = 0
+# Restrict Kernel Logs (dmesg)
+kernel.dmesg_restrict = 1
+# Restrict BPF (Common exploit vector)
+kernel.unprivileged_bpf_disabled = 1
+EOF
+sysctl -p /etc/sysctl.d/99-ccdc-hardening.conf >/dev/null
+log "Kernel parameters hardened."
 
-# Password reset option (safe method: user-seed + passwd backup)
-read -r -s -p "Enter NEW Splunk admin password (leave blank to SKIP reset): " SPLUNK_ADMIN_PASS; echo
-DO_RESET_SPLUNK_PASS=0
-if [[ -n "${SPLUNK_ADMIN_PASS}" ]]; then
-  DO_RESET_SPLUNK_PASS=1
-fi
+# ==============================================================================
+# 3. SPLUNK 10.x "GOD TIER" HARDENING
+# ==============================================================================
+if; then
+    log "Engaging Splunk Hardening Protocol..."
+    
+    # Stop Service for config surgery
+    "$SPLUNK_HOME/bin/splunk" stop
 
-# Always whitelist current SSH client if present (prevents lockout mid-run)
-SSH_CLIENT_IP=""
-if [[ -n "${SSH_CLIENT:-}" ]]; then
-  SSH_CLIENT_IP="$(echo "$SSH_CLIENT" | awk '{print $1}')"
-  echo "[+] Detected SSH client IP: $SSH_CLIENT_IP (will be whitelisted)"
-else
-  echo "[!] No SSH_CLIENT detected (console run)."
-fi
+    # 3.1: IDENTITY NUKE (User-Seed Method)
+    # Delete the local passwd file. This removes ANY backdoor users created by Red Team.
+    # Splunk 10.x will regenerate it from user-seed.conf.
+    rm -f "$SPLUNK_HOME/etc/passwd"
+    mkdir -p "$SPLUNK_HOME/etc/system/local"
+    cat > "$SPLUNK_HOME/etc/system/local/user-seed.conf" <<EOF
+[user_info]
+USERNAME = admin
+PASSWORD = $SPLUNK_PASS
+EOF
+    log "Splunk local password file wiped and re-seeded."
 
-# Determine active interface for default route
-ACTIVE_IF="$(ip route | awk '/default/ {print $5; exit}')"
-echo "[+] Default route interface: ${ACTIVE_IF:-unknown}"
-
-# -------------------------
-# 1) QUICK SYSTEM SNAPSHOT
-# -------------------------
-echo "[+] Snapshot: listening ports + enabled services"
-ss -lntup || true
-systemctl list-unit-files --state=enabled || true
-
-# -------------------------
-# 2) SPLUNK WEB HARDENING
-# -------------------------
-echo "[+] Hardening Splunk Web config"
-
-mkdir -p "$SPLUNK_HOME/etc/system/local"
-
-# 2a) web.conf: disable insecure_login endpoint; reduce risky web features
-# The Splunk web.conf reference documents enable_insecure_login and its purpose. :contentReference[oaicite:5]{index=5}
-# The example shows dashboard_html_allow_embeddable_content. :contentReference[oaicite:6]{index=6}
-cat > "$SPLUNK_HOME/etc/system/local/web.conf" <<EOF
+    # 3.2: KILL WEB ATTACK VECTORS (web.conf)
+    cat > "$SPLUNK_HOME/etc/system/local/web.conf" <<EOF
 [settings]
-# Keep Splunk Web on the expected port for scoring
 httpport = 8000
 startwebserver = 1
-
-# Disable /insecure_login endpoint
+# Disable legacy insecure login (CVE vector)
 enable_insecure_login = false
-
-# Reduce risk from embedded content in dashboards
-dashboard_html_allow_embeddable_content = false
-dashboard_html_wrap_embed = true
-
-# If we bind splunk services, mgmtHostPort must match the bind IP
+# Prevent Clickjacking
+x_frame_options_sameorigin = true
+# Disable Python execution via web (Hardens against Web Shells)
+enable_python_endpoints = false
+# Force HSTS
+enableSplunkWebSSL = true
 EOF
 
-# If binding requested: set mgmtHostPort to bind ip (same concept Splunk warns about). :contentReference[oaicite:7]{index=7}
-if [[ -n "${SPLUNK_BIND_IP}" ]]; then
-  echo "mgmtHostPort = ${SPLUNK_BIND_IP}:8089" >> "$SPLUNK_HOME/etc/system/local/web.conf"
-fi
-
-# 2b) Disable app installation via limits.conf
-# Splunk’s authorize.conf reference shows /services/apps/local requires enable_install_apps=true;
-# setting it false blocks that path. :contentReference[oaicite:8]{index=8}
-cat > "$SPLUNK_HOME/etc/system/local/limits.conf" <<'EOF'
+    # 3.3: DISABLE APP INSTALLS (limits.conf)
+    # Critical for 10.x. Prevents uploading malicious apps via REST API.
+    cat > "$SPLUNK_HOME/etc/system/local/limits.conf" <<EOF
 [restapi]
 enable_install_apps = false
 EOF
 
-# 2c) OPTIONAL: bind Splunk services to the assigned IP (shrinks exposure)
-# Splunk documents SPLUNK_BINDIP usage and the need to align mgmtHostPort. :contentReference[oaicite:9]{index=9}
-if [[ -n "${SPLUNK_BIND_IP}" ]]; then
-  echo "[+] Applying SPLUNK_BINDIP=$SPLUNK_BIND_IP"
-  # Backup
-  if [[ -f "$SPLUNK_HOME/etc/splunk-launch.conf" ]]; then
-    cp -a "$SPLUNK_HOME/etc/splunk-launch.conf" "$SPLUNK_HOME/etc/splunk-launch.conf.bak.$(date +%s)"
-  fi
-  # Ensure file exists
-  touch "$SPLUNK_HOME/etc/splunk-launch.conf"
-  # Remove existing SPLUNK_BINDIP lines, then add ours
-  sed -i '/^\s*SPLUNK_BINDIP\s*=/d' "$SPLUNK_HOME/etc/splunk-launch.conf"
-  echo "SPLUNK_BINDIP=${SPLUNK_BIND_IP}" >> "$SPLUNK_HOME/etc/splunk-launch.conf"
-fi
-
-# 2d) Password reset (safe method: backup passwd, set user-seed, restart)
-# Splunk community documents user-seed.conf reset flow. :contentReference[oaicite:10]{index=10}
-if [[ $DO_RESET_SPLUNK_PASS -eq 1 ]]; then
-  echo "[+] Resetting Splunk admin password via user-seed method (backup passwd)"
-  "$SPLUNK_HOME/bin/splunk" stop || true
-
-  if [[ -f "$SPLUNK_HOME/etc/passwd" ]]; then
-    cp -a "$SPLUNK_HOME/etc/passwd" "$SPLUNK_HOME/etc/passwd.bak.$(date +%s)"
-    # Move aside to force reseed
-    mv -f "$SPLUNK_HOME/etc/passwd" "$SPLUNK_HOME/etc/passwd.reset.$(date +%s)"
-  fi
-
-  cat > "$SPLUNK_HOME/etc/system/local/user-seed.conf" <<EOF
-[user_info]
-USERNAME = admin
-PASSWORD = ${SPLUNK_ADMIN_PASS}
+    # 3.4: DISABLE 'runshellscript' (commands.conf & alert_actions.conf)
+    # This kills the #1 Red Team persistence method in Splunk (Alert Scripts).
+    cat > "$SPLUNK_HOME/etc/system/local/commands.conf" <<EOF
+[runshellscript]
+disabled = true
+is_risky = true
 EOF
 
-  "$SPLUNK_HOME/bin/splunk" start --accept-license --answer-yes --no-prompt --run-as-root
+    cat > "$SPLUNK_HOME/etc/system/local/alert_actions.conf" <<EOF
+[script]
+disabled = 1
+EOF
+    log "Splunk 'runshellscript' and Scripted Alerts DISABLED."
+
+    # 3.5: APP SWEEP
+    # Look for executable files inside app directories
+    log "Sweeping apps for executables..."
+    find "$SPLUNK_HOME/etc/apps" -name "*.sh" -o -name "*.py" -o -name "*.exe" > "$LOG.suspicious_apps"
+    if [ -s "$LOG.suspicious_apps" ]; then
+        alert "SUSPICIOUS EXECUTABLES FOUND IN SPLUNK APPS! (See $LOG.suspicious_apps)"
+        # Optional: chmod them to non-executable
+        # xargs -a "$LOG.suspicious_apps" chmod -x
+    fi
+
+    # Start Splunk
+    "$SPLUNK_HOME/bin/splunk" start --accept-license --answer-yes --no-prompt
 else
-  echo "[!] Skipping Splunk password reset."
-  # Still restart to ensure config changes apply
-  "$SPLUNK_HOME/bin/splunk" restart || true
+    warn "Splunk directory not found. Skipping Splunk steps."
 fi
 
-# -------------------------
-# 3) FIREWALL LOCKDOWN (Netlab-safe)
-# -------------------------
-echo "[+] Firewall lockdown (allow only what scoring/blue needs)"
-
-# Ensure firewalld exists/runs
-if ! command -v firewall-cmd >/dev/null 2>&1; then
-  echo "[+] Installing firewalld"
-  dnf -y install firewalld
-fi
-
+# ==============================================================================
+# 4. FIREWALL (NFTABLES via FIREWALLD)
+# ==============================================================================
+log "Configuring Firewalld (Drop-All Strategy)..."
 systemctl enable --now firewalld
 
-# Create dedicated zone
-ZONE="mwccdc"
-firewall-cmd --permanent --new-zone="$ZONE" 2>/dev/null || true
+# Create a clean zone called 'ccdc'
+firewall-cmd --permanent --new-zone=ccdc 2>/dev/null
+firewall-cmd --permanent --zone=ccdc --set-target=DROP
 
-# Attach interface to our zone (if we detected one)
-if [[ -n "${ACTIVE_IF}" ]]; then
-  firewall-cmd --permanent --zone="$ZONE" --change-interface="$ACTIVE_IF" || true
-fi
+# Allow SSH (You + Scoring)
+firewall-cmd --permanent --zone=ccdc --add-rich-rule="rule family='ipv4' source address='$SCORING_SUBNET' port port='22' protocol='tcp' accept"
+firewall-cmd --permanent --zone=ccdc --add-rich-rule="rule family='ipv4' source address='$MY_IP' port port='22' protocol='tcp' accept"
 
-# Default: drop everything not explicitly allowed
-firewall-cmd --permanent --zone="$ZONE" --set-target=DROP
+# Allow Splunk Web (8000) & Ingestion (9997) - SCORING ONLY
+firewall-cmd --permanent --zone=ccdc --add-rich-rule="rule family='ipv4' source address='$SCORING_SUBNET' port port='8000' protocol='tcp' accept"
+firewall-cmd --permanent --zone=ccdc --add-rich-rule="rule family='ipv4' source address='$SCORING_SUBNET' port port='9997' protocol='tcp' accept"
 
-# Allow established/related
-firewall-cmd --permanent --zone="$ZONE" --add-rich-rule="rule family='ipv4' accept" >/dev/null 2>&1 || true
-# Note: firewalld zones handle stateful rules automatically; we keep explicit allowances below.
+# Allow ICMP (Ping)
+firewall-cmd --permanent --zone=ccdc --add-protocol=icmp
 
-# Allow SSH from allowed subnet and current SSH client
-firewall-cmd --permanent --zone="$ZONE" --add-rich-rule="rule family='ipv4' source address='${ALLOW_SUBNET}' port port='22' protocol='tcp' accept"
-if [[ -n "${SSH_CLIENT_IP}" ]]; then
-  firewall-cmd --permanent --zone="$ZONE" --add-rich-rule="rule family='ipv4' source address='${SSH_CLIENT_IP}/32' port port='22' protocol='tcp' accept"
-fi
+# BLOCK 8089 (Mgmt) to everyone except localhost
+firewall-cmd --permanent --zone=ccdc --add-rich-rule="rule family='ipv4' source address='127.0.0.1' port port='8089' protocol='tcp' accept"
 
-# Allow Splunk Web (8000/tcp) from scoring subnet (and your SSH IP if present)
-firewall-cmd --permanent --zone="$ZONE" --add-rich-rule="rule family='ipv4' source address='${ALLOW_SUBNET}' port port='8000' protocol='tcp' accept"
-if [[ -n "${SSH_CLIENT_IP}" ]]; then
-  firewall-cmd --permanent --zone="$ZONE" --add-rich-rule="rule family='ipv4' source address='${SSH_CLIENT_IP}/32' port port='8000' protocol='tcp' accept"
-fi
-
-# Allow Splunk receiving (9997/tcp) ONLY from allowed subnet (forwarders/scoring may need this)
-firewall-cmd --permanent --zone="$ZONE" --add-rich-rule="rule family='ipv4' source address='${ALLOW_SUBNET}' port port='9997' protocol='tcp' accept"
-
-# Allow ICMP ping from scoring subnet (your scoring note requires ping reachability)
-firewall-cmd --permanent --zone="$ZONE" --add-rich-rule="rule family='ipv4' source address='${ALLOW_SUBNET}' icmp-type name='echo-request' accept"
-
-# Restrict Splunk management (8089) to localhost unless you explicitly need remote management.
-# If you bound Splunk to SPLUNK_BINDIP, Splunk docs warn mgmtHostPort must match; but this firewall still prevents remote hits. :contentReference[oaicite:11]{index=11}
-firewall-cmd --permanent --zone="$ZONE" --add-rich-rule="rule family='ipv4' source address='127.0.0.1/32' port port='8089' protocol='tcp' accept"
-
+# Apply to active interface
+ACTIVE_IF=$(ip route get 8.8.8.8 | awk '{print $5; exit}')
+firewall-cmd --permanent --zone=ccdc --change-interface="$ACTIVE_IF"
 firewall-cmd --reload
+log "Firewall locked down on interface $ACTIVE_IF."
 
-echo "[+] Firewall active zones:"
-firewall-cmd --get-active-zones || true
+# ==============================================================================
+# 5. IMMUTABLE LOCKDOWN (THE "STAY OUT" PHASE)
+# ==============================================================================
+log "Applying Immutable Locks (Chattr)..."
 
-# -------------------------
-# 4) DISABLE COMMON NONESSENTIAL SERVICES (Conservative)
-# -------------------------
-echo "[+] Disabling common nonessential services (only if present)"
-for svc in \
-  avahi-daemon cups rpcbind nfs-server smb nmb vsftpd tftp \
-  telnet.socket rsh.socket rlogin.socket rexec.socket \
-  cockpit.socket bluetooth ; do
-  systemctl disable --now "$svc" >/dev/null 2>&1 || true
+# 5.1 SSH Keys
+mkdir -p /root/.ssh
+touch /root/.ssh/authorized_keys
+# Ensure we are not locking ourselves out - verify key exists or file is empty
+if [ -s /root/.ssh/authorized_keys ]; then
+    log "Preserving existing root authorized_keys."
+else
+    warn "Root authorized_keys is empty. Ensure you have console access!"
+fi
+# Remove immutable if already set (to allow this script to run multiple times), then set it
+chattr -i /root/.ssh/authorized_keys 2>/dev/null
+chattr +i /root/.ssh/authorized_keys
+chattr +i /root/.ssh
+log "Root SSH keys are now IMMUTABLE (+i). Red Team cannot add keys."
+
+# 5.2 Critical Configs
+chattr +i /etc/passwd
+chattr +i /etc/shadow
+chattr +i /etc/gdm/custom.conf
+log "System User Database (passwd/shadow) is now IMMUTABLE."
+
+# ==============================================================================
+# 6. ACTIVE MONITORING DASHBOARD (CLI)
+# ==============================================================================
+log "Configuring Auditd Rules..."
+# Clear old rules
+auditctl -D >/dev/null
+
+# Watch for persistence
+auditctl -w /root/.ssh/authorized_keys -p wa -k ssh_key_tamper
+auditctl -w /etc/passwd -p wa -k user_tamper
+auditctl -w /etc/shadow -p wa -k user_tamper
+auditctl -w "$SPLUNK_HOME/etc/apps" -p wa -k splunk_app_tamper
+auditctl -w /etc/systemd/system -p wa -k service_tamper
+
+# Lock Auditd Configuration (Requires reboot to disable)
+auditctl -e 2
+
+echo ""
+echo -e "${YELLOW}============================================================${NC}"
+echo -e "${YELLOW}   LOCKDOWN COMPLETE. MONITORING MODE ENGAGED.${NC}"
+echo -e "${YELLOW}============================================================${NC}"
+echo "Watching for:"
+echo "1. SSH Key Modifications"
+echo "2. User/Password Changes"
+echo "3. Splunk App Changes (Persistence)"
+echo ""
+echo "Press Ctrl+C to stop watching (Protection remains active)."
+echo ""
+
+# Real-time Log Watcher
+# Filters for our specific audit keys and highlights them
+tail -f "$AUDIT_LOG" | grep --line-buffered -E 'ssh_key_tamper|user_tamper|splunk_app_tamper|service_tamper|EXECVE' | while read line; do
+    echo -e "${RED} $(date): $line${NC}"
 done
-
-# -------------------------
-# 5) BACKDOOR SWEEP (Netlab-safe defaults)
-# -------------------------
-echo "[+] Backdoor sweep (safe mode): report + quarantine list"
-REPORT="/root/mwccdc_report_$(date +%F_%H%M%S).txt"
-
-{
-  echo "=== USERS (uid>=1000) ==="
-  awk -F: '($3>=1000)&&($1!="nobody"){print}' /etc/passwd
-  echo
-  echo "=== SUDOERS (top-level) ==="
-  ls -la /etc/sudoers /etc/sudoers.d 2>/dev/null || true
-  echo
-  echo "=== AUTHORIZED_KEYS FOUND ==="
-  find /root /home -maxdepth 3 -type f -name authorized_keys -print -exec ls -la {} \; 2>/dev/null || true
-  echo
-  echo "=== LISTENING PORTS ==="
-  ss -lntup || true
-  echo
-  echo "=== SPLUNK VERSION ==="
-  "$SPLUNK_HOME/bin/splunk" version || true
-} > "$REPORT"
-
-echo "[+] Report written to: $REPORT"
-
-echo "[+] Finished. Validate from another machine:"
-echo "    - ping <splunk_ip>"
-echo "    - curl -k http://<splunk_ip>:8000 (or open in browser)"
-echo "    - nmap from scoring subnet should only show 22,8000,9997 (and NOT 8089)"
