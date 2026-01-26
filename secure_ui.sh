@@ -1,110 +1,57 @@
 #!/bin/bash
-# MWCCDC 2026 - SPLUNK UI HARDENING (NSA STANDARDS)
-# OBJECTIVE: DISABLE RCE VECTORS, STRIP PRIVILEGES, HUNT BACKDOORS
-# RUN AS ROOT
+set -u
+
+# ==============================================================================
+# CCDC 2026: SPLUNK WEB UI "DIAMOND" HARDENING
+# FOCUS: NEUTERING ADMIN & STERILIZING APPS
+# ==============================================================================
 
 SPLUNK_HOME="/opt/splunk"
+LOG="/var/log/splunk_diamond.log"
 
-echo "!!! INITIATING UI HARDENING PROTOCOL !!!"
+echo "Applying DIAMOND Level UI Hardening..."
 
-# Check for Root
-if [ "$EUID" -ne 0 ]; then
-  echo "[!] Please run as root."
-  exit
-fi
-
-# ==========================================
-# 1. WEB INTERFACE HARDENING (web.conf)
-# ==========================================
-echo "[1] SECURING WEB INTERFACE..."
-
-# Create local directory if missing
-mkdir -p $SPLUNK_HOME/etc/system/local
-
-# Unlock file if it exists (in case you ran script 1 already)
-chattr -i $SPLUNK_HOME/etc/system/local/web.conf 2>/dev/null
-
-# Check if [settings] stanza exists, if not add it
-if ! grep -q "\[settings\]" $SPLUNK_HOME/etc/system/local/web.conf; then
-    echo "[settings]" >> $SPLUNK_HOME/etc/system/local/web.conf
-fi
-
-# Append NSA-Level Security Settings
-# enable_upload_apps=false  -> STOPS RCE via App Upload
-# tools.sessions.timeout=5  -> Kicks idle users after 5 mins
-# updateCheckerBaseURL=0    -> Stops "Phone Home" leaks
-# x_frame_options_sameorigin -> Prevents Clickjacking
-cat >> $SPLUNK_HOME/etc/system/local/web.conf <<EOF
-
-# --- SECURITY HARDENING ---
-enable_upload_apps = false
-allow_remote_login = false
-enable_insecure_login = false
-updateCheckerBaseURL = 0
-tools.sessions.timeout = 5
-x_frame_options_sameorigin = true
-force_https_to_transport = true
-EOF
-
-echo "[-] Web RCE Vectors Disabled."
-
-# ==========================================
-# 2. PRIVILEGE STRIPPING (authorize.conf)
-# ==========================================
-echo "[2] NEUTERING ADMIN CAPABILITIES..."
-# We are modifying the 'admin' role to remove destructive capabilities.
-# Even with the password, they cannot install backdoors or stop the server.
-
-# Unlock authorize.conf
-chattr -i $SPLUNK_HOME/etc/system/local/authorize.conf 2>/dev/null
-
-cat >> $SPLUNK_HOME/etc/system/local/authorize.conf <<EOF
+# 1. NEUTER THE ADMIN ROLE (Score but don't Execute)
+# We modify authorize.conf to remove dangerous capabilities from 'admin'
+# This prevents you (or a hacker with your creds) from running shell commands via Search.
+mkdir -p "$SPLUNK_HOME/etc/system/local"
+cat >> "$SPLUNK_HOME/etc/system/local/authorize.conf" <<EOF
 [role_admin]
-# DISABLING DESTRUCTIVE CAPABILITIES
-install_apps = disabled
+# Remove ability to run script searches (RCE Vector)
 run_script_search = disabled
-restart_splunkd = disabled
+# Remove ability to edit server configs via API
 edit_server = disabled
 edit_monitor = disabled
 edit_script = disabled
 EOF
+echo "[+] Admin Role Neutered (Execution Disabled)."
 
-echo "[-] Admin Role Neutered (Cannot Install Apps/Scripts)."
+# 2. APP STERILIZATION (Kill Executables)
+# Recursively remove +x from ALL files in etc/apps.
+# This stops binary backdoors from running.
+if [ -d "$SPLUNK_HOME/etc/apps" ]; then
+    chmod -R -x "$SPLUNK_HOME/etc/apps"
+    echo "[+] Removed executable permissions from all Splunk Apps."
+fi
 
-# ==========================================
-# 3. BACKDOOR HUNTING
-# ==========================================
-echo "[3] HUNTING FOR PRE-PLANTED SHELLS..."
-echo "Scanning /etc/apps/ for suspicious Python/Shell scripts..."
+# 3. WEB CONF PERFECTION
+# Unlock file first
+chattr -i "$SPLUNK_HOME/etc/system/local/web.conf" 2>/dev/null
 
-# Create a log of findings
-HUNT_LOG="/root/splunk_backdoor_scan.log"
-echo "Scan started at $(date)" > $HUNT_LOG
+cat >> "$SPLUNK_HOME/etc/system/local/web.conf" <<EOF
+# STRICT SECURITY
+force_https_to_transport = true
+sslVersions = tls1.2, tls1.3
+# PREVENT REMOTE LOGIN (If you are using SSH Tunneling)
+# allow_remote_login = false 
+EOF
 
-# Find .py, .sh, .php, .pl files in the apps directory
-# Exclude standard Splunk python files if possible, but listing them is safer
-find $SPLUNK_HOME/etc/apps -type f \( -name "*.py" -o -name "*.sh" -o -name "*.php" -o -name "*.pl" \) -exec ls -la {} \; >> $HUNT_LOG
+# Lock it back up immediately
+chattr +i "$SPLUNK_HOME/etc/system/local/web.conf"
+echo "[+] Web Config Hyper-Hardened."
 
-# Check for "subprocess" or "socket" usage in those files (Signs of reverse shells)
-grep -rnE "subprocess|socket|os.system|/bin/sh|nc |ncat " $SPLUNK_HOME/etc/apps >> $HUNT_LOG
+# 4. RESTART TO APPLY
+echo "[+] Restarting Splunk..."
+"$SPLUNK_HOME/bin/splunk" restart
 
-echo "[-] Scan Complete. REVIEW FILE: $HUNT_LOG"
-echo "[-] If you see files in 'apps/search/bin' that you didn't put there, DELETE THEM."
-
-# ==========================================
-# 4. LOCKDOWN & RESTART
-# ==========================================
-echo "[4] APPLYING IMMUTABLE LOCKS..."
-
-# Lock Configs so they cannot be edited
-chattr +i $SPLUNK_HOME/etc/system/local/web.conf
-chattr +i $SPLUNK_HOME/etc/system/local/authorize.conf
-
-echo "[5] RESTARTING SPLUNK TO APPLY CHANGES..."
-$SPLUNK_HOME/bin/splunk restart --accept-license --answer-yes --run-as-root
-
-echo "!!! UI HARDENING COMPLETE !!!"
-echo "1. App Uploads: DISABLED"
-echo "2. Admin Permissions: RESTRICTED"
-echo "3. Session Timeout: 5 MINUTES"
-echo "4. Config Files: IMMUTABLE"
+echo "DIAMOND PROTOCOL COMPLETE."
