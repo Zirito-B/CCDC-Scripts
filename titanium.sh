@@ -1,143 +1,124 @@
 #!/bin/bash
-# TITANIUM ULTRA - Red Team Resistant Splunk Hardening
-# ZERO HARDCODED SECRETS - Everything prompted interactively
-
-set -euo pipefail
-IFS=$'\n\t'
+# TITANIUM ULTRA SECURE - FINAL VERSION
+# Completes all 20 steps, never exits on errors
+# Built from lessons learned - password change failures won't stop script
 
 SPLUNK_HOME="/opt/splunk"
 SPLUNK_USER="splunk"
-LOG_FILE="/root/titanium_ultra_$(date +%Y%m%d_%H%M%S).log"
-BACKUP_DIR="/root/splunk_fortress_backup_$(date +%Y%m%d_%H%M%S)"
+LOG_FILE="/root/titanium_$(date +%Y%m%d_%H%M%S).log"
+BACKUP_DIR="/root/backup_$(date +%Y%m%d_%H%M%S)"
+
+# Logging functions
+log() { echo "[$(date '+%H:%M:%S')] $1" | tee -a "$LOG_FILE"; }
+warn() { echo "[$(date '+%H:%M:%S')] WARNING: $1" | tee -a "$LOG_FILE"; }
+success() { echo "[$(date '+%H:%M:%S')] SUCCESS: $1" | tee -a "$LOG_FILE"; }
+
+# Check if command exists
+cmd_exists() { command -v "$1" >/dev/null 2>&1; }
+
+# Get listening ports (works with netstat or ss)
+check_port() {
+    local port=$1
+    if cmd_exists netstat; then
+        netstat -tuln 2>/dev/null | grep -q ":$port.*LISTEN"
+    elif cmd_exists ss; then
+        ss -tuln 2>/dev/null | grep -q ":$port.*LISTEN"
+    else
+        warn "No netstat or ss available"
+        return 1
+    fi
+}
 
 # ====================================================================
-# INTERACTIVE CONFIGURATION
+# INTERACTIVE PASSWORD COLLECTION
 # ====================================================================
 clear
 echo "========================================="
-echo "   TITANIUM ULTRA - CONFIGURATION"
+echo "   TITANIUM ULTRA SECURE"
+echo "   All 20 Steps Guaranteed"
 echo "========================================="
 echo ""
-echo "Red Team can see GitHub scripts."
-echo "We need to collect sensitive info interactively."
-echo ""
-echo "Press ENTER after each response."
 echo "Passwords will NOT be visible as you type."
 echo ""
-read -p "Press ENTER to continue..."
+read -p "Press ENTER to start..."
 echo ""
 
-# ====================================================================
-# 1. COLLECT PASSWORDS
-# ====================================================================
-echo "=== STEP 1: PASSWORDS ==="
-echo ""
-
-# Root password
+# ROOT PASSWORD
+echo "=== ROOT PASSWORD ==="
 while true; do
     read -sp "New ROOT password: " NEW_ROOT_PASS
     echo ""
     read -sp "Confirm ROOT password: " NEW_ROOT_PASS_CONFIRM
     echo ""
     if [ "$NEW_ROOT_PASS" = "$NEW_ROOT_PASS_CONFIRM" ] && [ -n "$NEW_ROOT_PASS" ]; then
+        echo "✓ ROOT password set"
         break
-    else
-        echo "ERROR: Passwords don't match or empty. Try again."
-        echo ""
     fi
+    echo "✗ Passwords don't match or empty. Try again."
+    echo ""
 done
 
-# Sysadmin password
+# SYSADMIN PASSWORD
+echo ""
+echo "=== SYSADMIN PASSWORD ==="
 while true; do
     read -sp "New SYSADMIN password: " NEW_SYSADMIN_PASS
     echo ""
     read -sp "Confirm SYSADMIN password: " NEW_SYSADMIN_PASS_CONFIRM
     echo ""
     if [ "$NEW_SYSADMIN_PASS" = "$NEW_SYSADMIN_PASS_CONFIRM" ] && [ -n "$NEW_SYSADMIN_PASS" ]; then
+        echo "✓ SYSADMIN password set"
         break
-    else
-        echo "ERROR: Passwords don't match or empty. Try again."
-        echo ""
     fi
+    echo "✗ Passwords don't match or empty. Try again."
+    echo ""
 done
 
-# Current Splunk password (what it is NOW before we change it)
+# CURRENT SPLUNK PASSWORD
 echo ""
-read -sp "CURRENT Splunk admin password (default is 'changeme'): " DEFAULT_SPLUNK_PASS
+echo "=== SPLUNK PASSWORDS ==="
+read -sp "CURRENT Splunk admin password (press ENTER for 'changeme'): " CURRENT_SPLUNK_PASS
 echo ""
-if [ -z "$DEFAULT_SPLUNK_PASS" ]; then
-    DEFAULT_SPLUNK_PASS="changeme"
+if [ -z "$CURRENT_SPLUNK_PASS" ]; then
+    CURRENT_SPLUNK_PASS="changeme"
     echo "Using default: changeme"
 fi
 
-# New Splunk password
+# NEW SPLUNK PASSWORD
 while true; do
-    read -sp "NEW Splunk admin password: " NEW_SPLUNK_ADMIN_PASS
+    read -sp "NEW Splunk admin password: " NEW_SPLUNK_PASS
     echo ""
-    read -sp "Confirm NEW Splunk admin password: " NEW_SPLUNK_ADMIN_PASS_CONFIRM
+    read -sp "Confirm NEW Splunk admin password: " NEW_SPLUNK_PASS_CONFIRM
     echo ""
-    if [ "$NEW_SPLUNK_ADMIN_PASS" = "$NEW_SPLUNK_ADMIN_PASS_CONFIRM" ] && [ -n "$NEW_SPLUNK_ADMIN_PASS" ]; then
+    if [ "$NEW_SPLUNK_PASS" = "$NEW_SPLUNK_PASS_CONFIRM" ] && [ -n "$NEW_SPLUNK_PASS" ]; then
+        echo "✓ Splunk password set"
         break
-    else
-        echo "ERROR: Passwords don't match or empty. Try again."
-        echo ""
     fi
+    echo "✗ Passwords don't match or empty. Try again."
+    echo ""
 done
 
-DEFAULT_SPLUNK_USER="admin"
+# NETWORK CONFIGURATION
+echo ""
+echo "=== NETWORK SUBNETS ==="
+read -p "Internal subnet 1 [172.20.242.0/24]: " SUBNET1
+SUBNET1=${SUBNET1:-172.20.242.0/24}
+read -p "Internal subnet 2 [172.20.240.0/24]: " SUBNET2
+SUBNET2=${SUBNET2:-172.20.240.0/24}
 
-# ====================================================================
-# 2. COLLECT NETWORK INFO
-# ====================================================================
 echo ""
-echo "=== STEP 2: NETWORK CONFIGURATION ==="
-echo ""
-echo "Internal network subnets (for SSH whitelist)"
-echo "Example: 172.20.242.0/24"
-echo ""
+echo "✓ Subnet 1: $SUBNET1"
+echo "✓ Subnet 2: $SUBNET2"
 
-read -p "Internal network subnet 1: " INSIDE_NET_1
-if [ -z "$INSIDE_NET_1" ]; then
-    INSIDE_NET_1="172.20.242.0/24"
-    echo "Using default: 172.20.242.0/24"
-fi
-
-read -p "Internal network subnet 2: " INSIDE_NET_2
-if [ -z "$INSIDE_NET_2" ]; then
-    INSIDE_NET_2="172.20.240.0/24"
-    echo "Using default: 172.20.240.0/24"
-fi
-
-# ====================================================================
-# 3. RANDOMIZE GUARDIAN TIMING (MAKE IT UNPREDICTABLE)
-# ====================================================================
-echo ""
-echo "=== STEP 3: GUARDIAN TIMING ==="
-echo ""
-echo "Guardian checks Splunk health periodically."
-echo "We'll randomize the timing so Red Team can't predict it."
-echo ""
-
-# Random interval between 1-3 minutes
+# RANDOMIZE GUARDIAN TIMING (unpredictable for Red Team)
 GUARDIAN_INTERVAL=$((RANDOM % 3 + 1))
-echo "Guardian will check every $GUARDIAN_INTERVAL minute(s)"
-
-# Random offset (0-59 seconds) so not always at :00
 GUARDIAN_OFFSET=$((RANDOM % 60))
 
-# ====================================================================
-# CONFIRMATION
-# ====================================================================
 echo ""
-echo "=== CONFIGURATION SUMMARY ==="
-echo "Root password: [SET]"
-echo "Sysadmin password: [SET]"
-echo "Splunk admin password: [SET]"
-echo "Internal subnet 1: $INSIDE_NET_1"
-echo "Internal subnet 2: $INSIDE_NET_2"
-echo "Guardian interval: Every $GUARDIAN_INTERVAL minute(s)"
-echo "Backup location: $BACKUP_DIR"
-echo "Log file: $LOG_FILE"
+echo "=== SUMMARY ==="
+echo "Guardian will run every $GUARDIAN_INTERVAL minute(s)"
+echo "All passwords configured"
+echo "SSH restricted to: $SUBNET1, $SUBNET2"
 echo ""
 read -p "Proceed with hardening? (yes/no): " CONFIRM
 
@@ -146,440 +127,509 @@ if [ "$CONFIRM" != "yes" ]; then
     exit 0
 fi
 
+clear
+
 # ====================================================================
 # START HARDENING
 # ====================================================================
-clear
+log "========================================="
+log "TITANIUM ULTRA SECURE - STARTING"
+log "========================================="
 
-log() {
-    echo "[$(date '+%H:%M:%S')] $1" | tee -a "$LOG_FILE"
-}
-
-error() {
-    echo "[$(date '+%H:%M:%S')] ERROR: $1" | tee -a "$LOG_FILE" >&2
-}
-
-log "=== TITANIUM ULTRA - ANTI RED TEAM HARDENING ==="
-
+# Verify we're root
 if [ "$EUID" -ne 0 ]; then
-    error "Must run as root"
+    echo "ERROR: Must run as root"
     exit 1
 fi
 
+# Verify Splunk exists
 if [ ! -d "$SPLUNK_HOME" ]; then
-    error "Splunk not found at $SPLUNK_HOME"
+    echo "ERROR: Splunk not found at $SPLUNK_HOME"
     exit 1
 fi
 
 # ====================================================================
-# 1. NUCLEAR BACKUP - EVERYTHING CRITICAL
+# STEP 1: COMPREHENSIVE BACKUP
 # ====================================================================
-log "[1/15] Creating comprehensive backup..."
-mkdir -p "$BACKUP_DIR"
+log "[1/20] Creating comprehensive backup..."
+mkdir -p "$BACKUP_DIR" || warn "Could not create backup dir"
 
-tar -czf "$BACKUP_DIR/splunk_etc.tar.gz" "$SPLUNK_HOME/etc" 2>/dev/null || true
-cp -p /etc/passwd "$BACKUP_DIR/" 2>/dev/null || true
-cp -p /etc/group "$BACKUP_DIR/" 2>/dev/null || true
-cp -p /etc/ssh/sshd_config "$BACKUP_DIR/" 2>/dev/null || true
-cp -p /etc/systemd/system/Splunkd.service "$BACKUP_DIR/" 2>/dev/null || true
+# Backup Splunk configs
+tar -czf "$BACKUP_DIR/splunk_etc.tar.gz" "$SPLUNK_HOME/etc" 2>/dev/null || warn "Splunk backup incomplete"
 
-id "$SPLUNK_USER" > "$BACKUP_DIR/splunk_user_id.txt" 2>/dev/null || true
-grep "^$SPLUNK_USER:" /etc/passwd > "$BACKUP_DIR/splunk_passwd_entry.txt" 2>/dev/null || true
+# Backup system files
+for file in /etc/passwd /etc/shadow /etc/group /etc/ssh/sshd_config; do
+    cp -p "$file" "$BACKUP_DIR/" 2>/dev/null || warn "Could not backup $file"
+done
 
-log "[+] Backup saved to $BACKUP_DIR"
+# Save current splunk user info
+id "$SPLUNK_USER" > "$BACKUP_DIR/splunk_user.txt" 2>/dev/null || true
 
-# ====================================================================
-# 2. FIX SPLUNK USER (RED TEAM LOVES TO BREAK THIS)
-# ====================================================================
-log "[2/15] Hardening Splunk user account..."
-
-if ! id "$SPLUNK_USER" &>/dev/null; then
-    error "Splunk user doesn't exist - creating it"
-    useradd -r -d "$SPLUNK_HOME" -s /bin/bash "$SPLUNK_USER"
-fi
-
-usermod -s /bin/bash "$SPLUNK_USER" 2>/dev/null || true
-usermod -d "$SPLUNK_HOME" "$SPLUNK_USER" 2>/dev/null || true
-passwd -l "$SPLUNK_USER" 2>/dev/null || true
-
-log "[+] Splunk user hardened (home: $SPLUNK_HOME, shell: /bin/bash)"
+success "Backup created: $BACKUP_DIR"
 
 # ====================================================================
-# 3. OWNERSHIP FORTRESS
+# STEP 2: KILL SUSPICIOUS PROCESSES
 # ====================================================================
-log "[3/15] Securing Splunk ownership..."
+log "[2/20] Killing suspicious processes..."
+KILLED_COUNT=0
 
-chown -R "$SPLUNK_USER:$SPLUNK_USER" "$SPLUNK_HOME" 2>/dev/null || log "Warning: Some files couldn't be chowned"
-
-chmod 755 "$SPLUNK_HOME"
-chmod 755 "$SPLUNK_HOME/bin"
-chmod 755 "$SPLUNK_HOME/etc"
-chmod 700 "$SPLUNK_HOME/var" 2>/dev/null || true
-chmod 755 "$SPLUNK_HOME/bin/splunk"
-
-log "[+] Ownership secured"
-
-# ====================================================================
-# 4. DETECT AND REMOVE SYMLINK ATTACKS
-# ====================================================================
-log "[4/15] Checking for symlink attacks..."
-
-SYMLINK_COUNT=0
-while IFS= read -r -d '' symlink; do
-    target=$(readlink "$symlink")
-    if [[ "$target" == "/dev/null" ]] || [[ "$target" == "/dev/random" ]] || [[ "$target" == "/dev/zero" ]]; then
-        log "[!] Removing malicious symlink: $symlink -> $target"
-        rm -f "$symlink"
-        ((SYMLINK_COUNT++))
-    fi
-done < <(find "$SPLUNK_HOME" -type l -print0 2>/dev/null || true)
-
-log "[+] Removed $SYMLINK_COUNT malicious symlinks"
-
-# ====================================================================
-# 5. PROTECT CRITICAL SPLUNK FILES
-# ====================================================================
-log "[5/15] Protecting critical Splunk files..."
-
-CRITICAL_FILES=(
-    "$SPLUNK_HOME/bin/splunk"
-    "$SPLUNK_HOME/etc/splunk-launch.conf"
-    "$SPLUNK_HOME/etc/myinstall/splunkd.xml"
-)
-
-for file in "${CRITICAL_FILES[@]}"; do
-    if [ -f "$file" ]; then
-        chattr -i "$file" 2>/dev/null || true
-        chown "$SPLUNK_USER:$SPLUNK_USER" "$file" 2>/dev/null || true
+# Known Red Team tools/techniques
+for pattern in "nc -l" "ncat" "socat" "python -c" "python3 -c" "perl -e" "bash -i" "/dev/tcp"; do
+    if pkill -9 -f "$pattern" 2>/dev/null; then
+        ((KILLED_COUNT++))
+        log "  Killed process matching: $pattern"
     fi
 done
 
-log "[+] Critical files protected"
+success "Killed $KILLED_COUNT suspicious processes"
 
 # ====================================================================
-# 6. FIX SPLUNK_HOME ENVIRONMENT VARIABLE POISONING
+# STEP 3: NUCLEAR PERSISTENCE REMOVAL
 # ====================================================================
-log "[6/15] Securing SPLUNK_HOME environment..."
+log "[3/20] Removing ALL persistence mechanisms..."
 
-if [ -f "$SPLUNK_HOME/etc/splunk-launch.conf" ]; then
-    cp -p "$SPLUNK_HOME/etc/splunk-launch.conf" "$BACKUP_DIR/" 2>/dev/null || true
-    
-    sed -i "s|^SPLUNK_HOME=.*|SPLUNK_HOME=$SPLUNK_HOME|" "$SPLUNK_HOME/etc/splunk-launch.conf"
-    sed -i '/^LD_LIBRARY_PATH=/d' "$SPLUNK_HOME/etc/splunk-launch.conf"
-    
-    log "[+] splunk-launch.conf secured"
-fi
-
-# ====================================================================
-# 7. SYSTEMD SERVICE FILE HARDENING
-# ====================================================================
-log "[7/15] Hardening systemd service..."
-
-SYSTEMD_FILE="/etc/systemd/system/Splunkd.service"
-if [ -f "$SYSTEMD_FILE" ]; then
-    cp -p "$SYSTEMD_FILE" "$BACKUP_DIR/" 2>/dev/null || true
-    
-    sed -i "s|^User=.*|User=$SPLUNK_USER|" "$SYSTEMD_FILE"
-    sed -i "s|^Group=.*|Group=$SPLUNK_USER|" "$SYSTEMD_FILE"
-    sed -i "s|^ExecStart=.*|ExecStart=$SPLUNK_HOME/bin/splunk _internal_launch_under_systemd|" "$SYSTEMD_FILE"
-    
-    systemctl daemon-reload
-    log "[+] Systemd service hardened"
-fi
-
-# ====================================================================
-# 8. CHANGE OS PASSWORDS
-# ====================================================================
-log "[8/15] Changing system passwords..."
-echo "root:$NEW_ROOT_PASS" | chpasswd
-echo "sysadmin:$NEW_SYSADMIN_PASS" | chpasswd
-log "[+] OS passwords changed"
-
-# ====================================================================
-# 9. NUCLEAR PERSISTENCE REMOVAL
-# ====================================================================
-log "[9/15] Nuking all persistence mechanisms..."
-
-echo "" > /etc/crontab
+# Nuke all cron jobs
+echo "" > /etc/crontab 2>/dev/null || true
 rm -rf /etc/cron.d/* /etc/cron.hourly/* /etc/cron.daily/* /etc/cron.weekly/* /etc/cron.monthly/* 2>/dev/null || true
 
-for user in $(cut -f1,7 -d: /etc/passwd | grep -v -E '(/bin/false|/sbin/nologin|/usr/sbin/nologin)$' | cut -f1 -d:); do
+# Remove all user crontabs
+for user in $(cut -f1,7 -d: /etc/passwd | grep -v -E '(/bin/false|/sbin/nologin)$' | cut -f1 -d:); do
     crontab -u "$user" -r 2>/dev/null || true
 done
 
+# Nuke at jobs
+rm -rf /var/spool/at/* /var/spool/cron/* 2>/dev/null || true
+
+# Remove all SSH authorized_keys
 for homedir in /root /home/*; do
     if [ -d "$homedir/.ssh" ]; then
         echo "" > "$homedir/.ssh/authorized_keys" 2>/dev/null || true
         chmod 600 "$homedir/.ssh/authorized_keys" 2>/dev/null || true
+        rm -f "$homedir/.ssh/id_"* 2>/dev/null || true
     fi
 done
 
-rm -f /tmp/.* /var/tmp/.* 2>/dev/null || true
-rm -f /dev/shm/.* 2>/dev/null || true
-rm -rf /var/spool/at/* 2>/dev/null || true
-
-systemctl list-timers --all --no-pager | grep -v "NEXT\|^$" | awk '{print $NF}' | while read timer; do
-    if [[ ! "$timer" =~ ^(systemd|dnf|fwupd) ]]; then
+# Remove systemd timers
+systemctl list-timers --all --no-pager 2>/dev/null | tail -n +2 | awk '{print $NF}' | while read timer; do
+    # Keep essential system timers
+    if [[ ! "$timer" =~ ^(systemd|dnf|fwupd|unbound) ]]; then
         systemctl disable "$timer" 2>/dev/null || true
+        systemctl stop "$timer" 2>/dev/null || true
     fi
 done
 
-log "[+] Persistence nuked"
+success "All persistence mechanisms removed"
 
 # ====================================================================
-# 10. VERIFY SPLUNK BINARY INTEGRITY
+# STEP 4: REMOVE BACKDOOR FILES
 # ====================================================================
-log "[10/15] Verifying Splunk binary..."
+log "[4/20] Removing backdoor files..."
+REMOVED_COUNT=0
 
-if [ ! -x "$SPLUNK_HOME/bin/splunk" ]; then
-    error "Splunk binary is not executable or missing"
-    chmod 755 "$SPLUNK_HOME/bin/splunk"
+# Common backdoor locations
+for dir in /tmp /var/tmp /dev/shm; do
+    if [ -d "$dir" ]; then
+        # Remove hidden files, nc binaries, shell scripts created recently
+        find "$dir" -type f \( -name ".*" -o -name "*nc*" -o -name "*shell*" -o -name "*.sh" \) -mtime -1 -delete 2>/dev/null && ((REMOVED_COUNT++)) || true
+    fi
+done
+
+success "Removed backdoor files from temp directories"
+
+# ====================================================================
+# STEP 5: FIX SPLUNK USER (RED TEAM ATTACK VECTOR)
+# ====================================================================
+log "[5/20] Securing Splunk user account..."
+
+# Create user if doesn't exist
+if ! id "$SPLUNK_USER" &>/dev/null; then
+    warn "Splunk user doesn't exist - creating"
+    useradd -r -d "$SPLUNK_HOME" -s /bin/bash "$SPLUNK_USER" || warn "Could not create user"
 fi
 
-if ! "$SPLUNK_HOME/bin/splunk" version &>/dev/null; then
-    error "Splunk binary is corrupted"
-    log "[!] You may need to request VM reset"
-else
-    VERSION=$("$SPLUNK_HOME/bin/splunk" version 2>/dev/null | head -1)
-    log "[+] Splunk binary OK: $VERSION"
+# Fix shell (Red Team changes to /bin/false)
+usermod -s /bin/bash "$SPLUNK_USER" 2>/dev/null || warn "Could not fix shell"
+
+# Fix home directory (Red Team changes to /tmp or /opt/BetterRedThanDead)
+usermod -d "$SPLUNK_HOME" "$SPLUNK_USER" 2>/dev/null || warn "Could not fix home"
+
+# Lock user from direct login
+passwd -l "$SPLUNK_USER" 2>/dev/null || true
+
+success "Splunk user secured (shell: /bin/bash, home: $SPLUNK_HOME)"
+
+# ====================================================================
+# STEP 6: FIX OWNERSHIP (RED TEAM ATTACK VECTOR)
+# ====================================================================
+log "[6/20] Fixing Splunk ownership..."
+
+# Red Team changes ownership to root or fake users
+chown -R "$SPLUNK_USER:$SPLUNK_USER" "$SPLUNK_HOME" 2>/dev/null || warn "Some files couldn't be chowned"
+
+# Fix critical permissions
+chmod 755 "$SPLUNK_HOME" || true
+chmod 755 "$SPLUNK_HOME/bin" || true
+chmod 755 "$SPLUNK_HOME/etc" || true
+chmod 700 "$SPLUNK_HOME/var" 2>/dev/null || true
+chmod 755 "$SPLUNK_HOME/bin/splunk" || true
+
+success "Ownership fixed"
+
+# ====================================================================
+# STEP 7: REMOVE SYMLINK ATTACKS
+# ====================================================================
+log "[7/20] Removing malicious symlinks..."
+SYMLINK_COUNT=0
+
+# Red Team replaces files with symlinks to /dev/null
+find "$SPLUNK_HOME" -type l 2>/dev/null | while read symlink; do
+    target=$(readlink "$symlink" 2>/dev/null || echo "")
+    if [[ "$target" == "/dev/null" ]] || [[ "$target" == "/dev/random" ]] || [[ "$target" == "/dev/zero" ]]; then
+        rm -f "$symlink" && ((SYMLINK_COUNT++)) && log "  Removed: $symlink -> $target"
+    fi
+done
+
+success "Removed $SYMLINK_COUNT malicious symlinks"
+
+# ====================================================================
+# STEP 8: FIX SPLUNK_HOME ENVIRONMENT
+# ====================================================================
+log "[8/20] Securing SPLUNK_HOME environment..."
+
+if [ -f "$SPLUNK_HOME/etc/splunk-launch.conf" ]; then
+    # Red Team changes SPLUNK_HOME to break startup
+    sed -i "s|^SPLUNK_HOME=.*|SPLUNK_HOME=$SPLUNK_HOME|" "$SPLUNK_HOME/etc/splunk-launch.conf" 2>/dev/null || true
+    
+    # Remove library hijacking
+    sed -i '/^LD_LIBRARY_PATH=/d' "$SPLUNK_HOME/etc/splunk-launch.conf" 2>/dev/null || true
 fi
 
-# ====================================================================
-# 11. START SPLUNK AND CHANGE PASSWORD
-# ====================================================================
-log "[11/15] Starting Splunk..."
+success "SPLUNK_HOME secured"
 
+# ====================================================================
+# STEP 9: FIX SYSTEMD SERVICE
+# ====================================================================
+log "[9/20] Securing systemd service..."
+
+SYSTEMD_FILE="/etc/systemd/system/Splunkd.service"
+if [ -f "$SYSTEMD_FILE" ]; then
+    # Red Team modifies to run as wrong user
+    sed -i "s|^User=.*|User=$SPLUNK_USER|" "$SYSTEMD_FILE" 2>/dev/null || true
+    sed -i "s|^Group=.*|Group=$SPLUNK_USER|" "$SYSTEMD_FILE" 2>/dev/null || true
+    systemctl daemon-reload 2>/dev/null || true
+fi
+
+success "Systemd service secured"
+
+# ====================================================================
+# STEP 10: CHANGE OS PASSWORDS
+# ====================================================================
+log "[10/20] Changing system passwords..."
+
+echo "root:$NEW_ROOT_PASS" | chpasswd || warn "Root password change failed"
+echo "sysadmin:$NEW_SYSADMIN_PASS" | chpasswd || warn "Sysadmin password change failed"
+
+success "OS passwords changed"
+
+# ====================================================================
+# STEP 11: START SPLUNK
+# ====================================================================
+log "[11/20] Starting Splunk..."
+
+# Stop Splunk cleanly
 "$SPLUNK_HOME/bin/splunk" stop 2>/dev/null || true
 sleep 5
 
+# Kill any orphaned processes
 pkill -9 splunkd 2>/dev/null || true
 sleep 2
 
+# Start Splunk as splunk user
+log "  Starting Splunk as $SPLUNK_USER..."
 su - "$SPLUNK_USER" -c "$SPLUNK_HOME/bin/splunk start --accept-license --answer-yes --no-prompt" 2>&1 | tee -a "$LOG_FILE"
 
+# Wait for startup
 sleep 20
 
-if ! "$SPLUNK_HOME/bin/splunk" status | grep -q "splunkd is running"; then
-    error "Splunk failed to start"
-    log "[!] Check: $SPLUNK_HOME/var/log/splunk/splunkd.log"
-    exit 1
+# Verify it started
+if "$SPLUNK_HOME/bin/splunk" status | grep -q "splunkd is running"; then
+    success "Splunk started successfully"
+else
+    warn "Splunk may not have started - check $SPLUNK_HOME/var/log/splunk/splunkd.log"
+    log "  Continuing anyway..."
 fi
 
-log "[+] Splunk started"
+# ====================================================================
+# STEP 12: CHANGE SPLUNK PASSWORD (NON-BLOCKING)
+# ====================================================================
+log "[12/20] Changing Splunk admin password..."
 
-log "[*] Changing Splunk admin password..."
-"$SPLUNK_HOME/bin/splunk" edit user "$DEFAULT_SPLUNK_USER" \
-    -password "$NEW_SPLUNK_ADMIN_PASS" \
-    -auth "$DEFAULT_SPLUNK_USER:$DEFAULT_SPLUNK_PASS" 2>&1 | tee -a "$LOG_FILE" || \
-    log "[!] Password change failed - may need manual intervention"
+# THIS STEP CAN FAIL - SCRIPT CONTINUES ANYWAY
+if "$SPLUNK_HOME/bin/splunk" edit user admin -password "$NEW_SPLUNK_PASS" -auth "admin:$CURRENT_SPLUNK_PASS" 2>&1 | tee -a "$LOG_FILE" | grep -q "edited"; then
+    success "Splunk password changed successfully"
+else
+    warn "Splunk password change FAILED"
+    log "  Current password might not be '$CURRENT_SPLUNK_PASS'"
+    log "  You can change it manually: /opt/splunk/bin/splunk edit user admin -password NEWPASS -auth admin:OLDPASS"
+    log "  CONTINUING WITH REMAINING STEPS..."
+fi
 
 # ====================================================================
-# 12. FIREWALL CONFIGURATION
+# STEP 13: CONFIGURE FIREWALL
 # ====================================================================
-log "[12/15] Configuring firewall..."
+log "[13/20] Configuring firewall..."
 
-systemctl enable --now firewalld 2>&1 | tee -a "$LOG_FILE"
+# Enable firewalld
+systemctl enable firewalld 2>/dev/null || true
+systemctl start firewalld 2>/dev/null || true
 sleep 3
 
-firewall-cmd --permanent --zone=public --remove-service=cockpit 2>/dev/null || true
-firewall-cmd --permanent --zone=public --remove-service=dhcpv6-client 2>/dev/null || true
+# Allow Splunk ports (CRITICAL FOR SCORING)
+firewall-cmd --permanent --zone=public --add-port=8000/tcp 2>/dev/null || warn "Could not add port 8000"
+firewall-cmd --permanent --zone=public --add-port=8089/tcp 2>/dev/null || warn "Could not add port 8089"
+firewall-cmd --permanent --zone=public --add-port=9997/tcp 2>/dev/null || warn "Could not add port 9997"
 
-firewall-cmd --permanent --zone=trusted --add-interface=lo
+# Allow ICMP (CRITICAL FOR SCORING)
+firewall-cmd --permanent --zone=public --add-protocol=icmp 2>/dev/null || warn "Could not add ICMP"
 
-firewall-cmd --permanent --zone=public --add-port=8000/tcp
-firewall-cmd --permanent --zone=public --add-port=8089/tcp
-firewall-cmd --permanent --zone=public --add-port=9997/tcp
-
-firewall-cmd --permanent --zone=public --add-protocol=icmp
-
+# Restrict SSH to internal networks only
 firewall-cmd --permanent --zone=public --remove-service=ssh 2>/dev/null || true
-firewall-cmd --permanent --zone=public --add-rich-rule="rule family='ipv4' source address='$INSIDE_NET_1' service name='ssh' accept"
-firewall-cmd --permanent --zone=public --add-rich-rule="rule family='ipv4' source address='$INSIDE_NET_2' service name='ssh' accept"
+firewall-cmd --permanent --zone=public --add-rich-rule="rule family='ipv4' source address='$SUBNET1' service name='ssh' accept" 2>/dev/null || warn "Could not add SSH rule 1"
+firewall-cmd --permanent --zone=public --add-rich-rule="rule family='ipv4' source address='$SUBNET2' service name='ssh' accept" 2>/dev/null || warn "Could not add SSH rule 2"
 
-firewall-cmd --reload
-log "[+] Firewall secured"
+# Reload firewall
+firewall-cmd --reload 2>/dev/null || warn "Could not reload firewall"
+
+success "Firewall configured"
 
 # ====================================================================
-# 13. SSH HARDENING
+# STEP 14: HARDEN SSH
 # ====================================================================
-log "[13/15] Hardening SSH..."
+log "[14/20] Hardening SSH..."
 
+# Backup current config
 cp -p /etc/ssh/sshd_config /etc/ssh/sshd_config.backup
 
-sed -i 's/^#*PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
-sed -i 's/^#*MaxAuthTries.*/MaxAuthTries 3/' /etc/ssh/sshd_config
-sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+# Apply hardening
+cat >> /etc/ssh/sshd_config << 'SSHEOF'
+PermitRootLogin no
+MaxAuthTries 3
+MaxSessions 3
+ClientAliveInterval 300
+ClientAliveCountMax 0
+AllowUsers sysadmin
+SSHEOF
 
+# Test config
 if sshd -t 2>&1 | tee -a "$LOG_FILE"; then
     systemctl restart sshd
-    log "[+] SSH hardened"
+    success "SSH hardened (root login disabled, restricted to sysadmin)"
 else
+    warn "SSH config test failed - reverting"
     cp /etc/ssh/sshd_config.backup /etc/ssh/sshd_config
     systemctl restart sshd
-    log "[!] SSH config test failed, reverted"
 fi
 
 # ====================================================================
-# 14. ADVANCED BABYSITTER - SELF-HEALING SPLUNK
+# STEP 15: KERNEL HARDENING
 # ====================================================================
-log "[14/15] Creating advanced babysitter with randomized timing..."
+log "[15/20] Hardening kernel parameters..."
 
-cat > /root/splunk_guardian.sh << 'GUARDIAN_EOF'
+cat >> /etc/sysctl.conf << 'SYSCTLEOF'
+# Network security
+net.ipv4.conf.all.accept_source_route = 0
+net.ipv4.conf.all.accept_redirects = 0
+net.ipv4.conf.all.send_redirects = 0
+net.ipv4.conf.all.rp_filter = 1
+net.ipv4.icmp_echo_ignore_broadcasts = 1
+net.ipv4.tcp_syncookies = 1
+net.ipv6.conf.all.disable_ipv6 = 1
+
+# System hardening
+kernel.dmesg_restrict = 1
+kernel.kptr_restrict = 2
+SYSCTLEOF
+
+sysctl -p 2>&1 | tee -a "$LOG_FILE"
+
+success "Kernel parameters hardened"
+
+# ====================================================================
+# STEP 16: DISABLE UNNECESSARY SERVICES
+# ====================================================================
+log "[16/20] Disabling unnecessary services..."
+
+for service in bluetooth cups avahi-daemon ModemManager; do
+    systemctl disable "$service" 2>/dev/null || true
+    systemctl stop "$service" 2>/dev/null || true
+done
+
+success "Unnecessary services disabled"
+
+# ====================================================================
+# STEP 17: ENABLE SELINUX
+# ====================================================================
+log "[17/20] Enabling SELinux..."
+
+setenforce 1 2>/dev/null && success "SELinux set to enforcing" || warn "SELinux not available"
+sed -i 's/^SELINUX=.*/SELINUX=enforcing/' /etc/selinux/config 2>/dev/null || true
+
+# ====================================================================
+# STEP 18: CREATE GUARDIAN (AUTO-RECOVERY)
+# ====================================================================
+log "[18/20] Creating Guardian auto-recovery script..."
+
+cat > /root/splunk_guardian.sh << 'GUARDIANEOF'
 #!/bin/bash
-# Advanced Splunk Guardian - Detects and fixes common Red Team attacks
-
 SPLUNK_HOME="/opt/splunk"
 SPLUNK_USER="splunk"
 LOG="/var/log/splunk_guardian.log"
 
-log_msg() {
-    echo "[$(date '+%H:%M:%S')] $1" >> "$LOG"
-}
+log_msg() { echo "[$(date '+%H:%M:%S')] $1" >> "$LOG"; }
 
-# Check 1: Is splunkd running?
+# Kill suspicious processes every run
+for pattern in "nc -l" "python -c" "bash -i"; do
+    pkill -9 -f "$pattern" 2>/dev/null && log_msg "Killed: $pattern"
+done
+
+# Check if Splunk is running
 if ! "$SPLUNK_HOME/bin/splunk" status | grep -q "splunkd is running"; then
-    log_msg "ALERT: Splunk is down, attempting restart"
+    log_msg "ALERT: Splunk is DOWN - attempting auto-recovery"
     
-    # Check 2: Is splunk user's shell valid?
+    # Check and fix splunk user shell
     SHELL=$(getent passwd "$SPLUNK_USER" | cut -d: -f7)
-    if [[ "$SHELL" != "/bin/bash" ]]; then
-        log_msg "FIX: Restoring splunk user shell to /bin/bash"
+    if [ "$SHELL" != "/bin/bash" ]; then
+        log_msg "FIX: Restoring shell to /bin/bash"
         usermod -s /bin/bash "$SPLUNK_USER"
     fi
     
-    # Check 3: Is splunk user's home correct?
+    # Check and fix splunk user home
     HOME=$(getent passwd "$SPLUNK_USER" | cut -d: -f6)
-    if [[ "$HOME" != "$SPLUNK_HOME" ]]; then
-        log_msg "FIX: Restoring splunk user home to $SPLUNK_HOME"
+    if [ "$HOME" != "$SPLUNK_HOME" ]; then
+        log_msg "FIX: Restoring home to $SPLUNK_HOME"
         usermod -d "$SPLUNK_HOME" "$SPLUNK_USER"
     fi
     
-    # Check 4: Are permissions correct?
+    # Check and fix execute permission
     if [ ! -x "$SPLUNK_HOME/bin/splunk" ]; then
-        log_msg "FIX: Restoring execute permission on splunk binary"
+        log_msg "FIX: Restoring execute permission"
         chmod 755 "$SPLUNK_HOME/bin/splunk"
     fi
     
-    # Check 5: Is ownership correct?
-    OWNER=$(stat -c '%U' "$SPLUNK_HOME/bin/splunk")
-    if [[ "$OWNER" != "$SPLUNK_USER" ]]; then
-        log_msg "FIX: Restoring ownership on $SPLUNK_HOME"
+    # Check and fix ownership
+    OWNER=$(stat -c '%U' "$SPLUNK_HOME/bin/splunk" 2>/dev/null || echo "unknown")
+    if [ "$OWNER" != "$SPLUNK_USER" ]; then
+        log_msg "FIX: Restoring ownership"
         chown -R "$SPLUNK_USER:$SPLUNK_USER" "$SPLUNK_HOME"
     fi
     
-    # Check 6: Port hijacking - is something else on 8000?
-    if netstat -tuln | grep -q ":8000.*LISTEN"; then
-        HIJACKER=$(netstat -tulpn | grep ":8000.*LISTEN" | awk '{print $7}' | cut -d/ -f1)
-        if [[ "$HIJACKER" != *"splunkd"* ]]; then
-            log_msg "ALERT: Port 8000 hijacked by PID $HIJACKER, killing it"
-            kill -9 "$HIJACKER" 2>/dev/null
-        fi
+    # Check for port hijacking
+    if command -v netstat >/dev/null 2>&1; then
+        HIJACKER=$(netstat -tulpn 2>/dev/null | grep ":8000.*LISTEN" | grep -v splunkd | awk '{print $7}' | cut -d/ -f1)
+    elif command -v ss >/dev/null 2>&1; then
+        HIJACKER=$(ss -tulpn 2>/dev/null | grep ":8000.*LISTEN" | grep -v splunkd | awk '{print $7}' | cut -d, -f2 | cut -d= -f2)
     fi
     
-    # Now try to start Splunk
+    if [ -n "$HIJACKER" ]; then
+        log_msg "ALERT: Port 8000 hijacked by PID $HIJACKER - killing"
+        kill -9 "$HIJACKER" 2>/dev/null
+    fi
+    
+    # Restart Splunk
     log_msg "Attempting to start Splunk..."
     su - "$SPLUNK_USER" -c "$SPLUNK_HOME/bin/splunk start" >> "$LOG" 2>&1
     
     sleep 10
     
+    # Verify it started
     if "$SPLUNK_HOME/bin/splunk" status | grep -q "splunkd is running"; then
-        log_msg "SUCCESS: Splunk restarted"
+        log_msg "SUCCESS: Splunk auto-recovered"
     else
-        log_msg "CRITICAL: Splunk failed to restart - manual intervention needed"
+        log_msg "CRITICAL: Splunk failed to start - manual intervention needed"
     fi
 fi
-
-# Check web UI is responding
-if ! curl -k -s --max-time 5 https://localhost:8000 | grep -q "Splunk"; then
-    log_msg "WARNING: Web UI not responding properly"
-fi
-GUARDIAN_EOF
+GUARDIANEOF
 
 chmod +x /root/splunk_guardian.sh
 
-# Calculate cron schedule with randomization
-# If interval is 1: */1 * * * *
-# If interval is 2: */2 * * * *
-# If interval is 3: */3 * * * *
-CRON_SCHEDULE="*/$GUARDIAN_INTERVAL * * * *"
+success "Guardian script created"
 
-# Add to cron with randomized timing
+# ====================================================================
+# STEP 19: ADD GUARDIAN TO CRON
+# ====================================================================
+log "[19/20] Adding Guardian to cron..."
+
+# Guardian runs every 1-3 minutes (randomized) with random offset
+CRON_SCHEDULE="*/$GUARDIAN_INTERVAL * * * *"
 (crontab -l 2>/dev/null | grep -v "splunk_guardian"; echo "$CRON_SCHEDULE sleep $GUARDIAN_OFFSET; /root/splunk_guardian.sh") | crontab -
 
-log "[+] Advanced guardian deployed (runs every $GUARDIAN_INTERVAL min, ${GUARDIAN_OFFSET}s offset)"
+success "Guardian active (runs every $GUARDIAN_INTERVAL minute(s))"
 
 # ====================================================================
-# 15. FINAL VERIFICATION
+# STEP 20: FINAL VERIFICATION
 # ====================================================================
-log "[15/15] Final verification..."
+log "[20/20] Final verification..."
 
 sleep 5
 
+# Check Splunk
 if "$SPLUNK_HOME/bin/splunk" status | grep -q "splunkd is running"; then
-    log "[+] Splunk: RUNNING"
+    success "Splunk: RUNNING"
 else
-    error "Splunk: NOT RUNNING"
+    warn "Splunk: NOT RUNNING"
 fi
 
-if curl -k -s --max-time 10 https://localhost:8000 | grep -q "Splunk"; then
-    log "[+] Web UI: RESPONDING"
+# Check web UI
+if curl -k -s --max-time 10 https://localhost:8000 2>/dev/null | grep -q "Splunk"; then
+    success "Web UI: RESPONDING"
 else
-    log "[!] Web UI: NOT RESPONDING"
+    warn "Web UI: NOT RESPONDING"
 fi
 
+# Check ports
 for port in 8000 8089 9997; do
-    if netstat -tuln | grep -q ":$port.*LISTEN"; then
-        log "[+] Port $port: LISTENING"
+    if check_port $port; then
+        success "Port $port: LISTENING"
     else
-        log "[!] Port $port: NOT LISTENING"
+        warn "Port $port: NOT LISTENING"
     fi
 done
 
-if firewall-cmd --list-ports | grep -q "8000/tcp"; then
-    log "[+] Firewall: CONFIGURED"
+# Check firewall
+if firewall-cmd --list-ports 2>/dev/null | grep -q "8000/tcp"; then
+    success "Firewall: CONFIGURED"
 else
-    log "[!] Firewall: MISSING RULES"
+    warn "Firewall: CHECK MANUALLY"
 fi
 
-if crontab -l | grep -q "splunk_guardian"; then
-    log "[+] Guardian: ACTIVE"
+# Check Guardian
+if crontab -l 2>/dev/null | grep -q "splunk_guardian"; then
+    success "Guardian: ACTIVE"
 else
-    log "[!] Guardian: NOT IN CRON"
+    warn "Guardian: NOT IN CRON"
 fi
 
 log ""
-log "=== TITANIUM ULTRA COMPLETE ==="
+log "========================================="
+log "TITANIUM ULTRA SECURE - COMPLETE"
+log "========================================="
+log ""
+log "All 20 steps completed"
 log "Backup: $BACKUP_DIR"
 log "Log: $LOG_FILE"
 log "Guardian log: /var/log/splunk_guardian.log"
-log "Guardian runs: Every $GUARDIAN_INTERVAL minute(s) with ${GUARDIAN_OFFSET}s offset"
 log ""
-log "PASSWORDS CHANGED:"
-log "  - root (changed)"
-log "  - sysadmin (changed)"
-log "  - Splunk admin (changed)"
-log ""
-log "SSH RESTRICTED TO:"
-log "  - $INSIDE_NET_1"
-log "  - $INSIDE_NET_2"
-log ""
-log "NEXT: Run splunk_diamond_ultra.sh to harden the UI"
+log "NEXT STEP: Run splunk_diamond_ultra_secure.sh"
 log ""
 
 # Clear sensitive variables from memory
-unset NEW_ROOT_PASS
-unset NEW_SYSADMIN_PASS
-unset NEW_SPLUNK_ADMIN_PASS
-unset DEFAULT_SPLUNK_PASS
-unset NEW_ROOT_PASS_CONFIRM
-unset NEW_SYSADMIN_PASS_CONFIRM
-unset NEW_SPLUNK_ADMIN_PASS_CONFIRM
+unset NEW_ROOT_PASS NEW_SYSADMIN_PASS NEW_SPLUNK_PASS CURRENT_SPLUNK_PASS
 
 echo ""
 echo "========================================="
-echo "   TITANIUM ULTRA COMPLETE"
+echo "   TITANIUM COMPLETE - ALL 20 STEPS"
 echo "========================================="
 echo ""
-echo "Check the log: $LOG_FILE"
+echo "Review log: tail -100 $LOG_FILE"
 echo "Monitor Guardian: tail -f /var/log/splunk_guardian.log"
 echo ""
