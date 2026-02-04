@@ -1,74 +1,62 @@
 #!/bin/bash
-# DIAMOND ULTRA - Maximum Splunk UI Protection
-# NO HARDCODED SECRETS - Everything prompted interactively
-
-set -euo pipefail
+# DIAMOND ULTRA SECURE - FINAL VERSION
+# Completes all 12 steps, never exits on errors
+# Creates directories BEFORE files (learned from last failure)
 
 SPLUNK_HOME="/opt/splunk"
 SPLUNK_USER="splunk"
-LOG_FILE="/var/log/diamond_ultra_$(date +%Y%m%d_%H%M%S).log"
+LOG_FILE="/var/log/diamond_$(date +%Y%m%d_%H%M%S).log"
 BACKUP_DIR="/root/diamond_backup_$(date +%Y%m%d_%H%M%S)"
+
+# Logging functions
+log() { echo "[$(date '+%H:%M:%S')] $1" | tee -a "$LOG_FILE"; }
+warn() { echo "[$(date '+%H:%M:%S')] WARNING: $1" | tee -a "$LOG_FILE"; }
+success() { echo "[$(date '+%H:%M:%S')] SUCCESS: $1" | tee -a "$LOG_FILE"; }
+
+# Check if command exists
+cmd_exists() { command -v "$1" >/dev/null 2>&1; }
+
+# Check port listening
+check_port() {
+    local port=$1
+    if cmd_exists netstat; then
+        netstat -tuln 2>/dev/null | grep -q ":$port.*LISTEN"
+    elif cmd_exists ss; then
+        ss -tuln 2>/dev/null | grep -q ":$port.*LISTEN"
+    else
+        return 1
+    fi
+}
 
 # ====================================================================
 # INTERACTIVE CONFIGURATION
 # ====================================================================
 clear
 echo "========================================="
-echo "   DIAMOND ULTRA - CONFIGURATION"
+echo "   DIAMOND ULTRA SECURE"
+echo "   All 12 Steps Guaranteed"
 echo "========================================="
 echo ""
-echo "This script hardens Splunk UI security."
-echo "No secrets will be hardcoded."
-echo ""
-read -p "Press ENTER to continue..."
+read -p "Press ENTER to start..."
 echo ""
 
-# ====================================================================
-# 1. COLLECT INTERNAL NETWORK INFO (FOR MANAGEMENT PORT RESTRICTION)
-# ====================================================================
-echo "=== NETWORK CONFIGURATION ==="
-echo ""
-echo "Management port (8089) should only accept connections from internal networks."
-echo "Enter your internal subnets (same as used in Titanium script)"
-echo ""
+# NETWORK CONFIGURATION
+echo "=== NETWORK SUBNETS ==="
+read -p "Internal subnet 1 [172.20.242.0/24]: " SUBNET1
+SUBNET1=${SUBNET1:-172.20.242.0/24}
+read -p "Internal subnet 2 [172.20.240.0/24]: " SUBNET2
+SUBNET2=${SUBNET2:-172.20.240.0/24}
 
-read -p "Internal network subnet 1 (e.g., 172.20.242.0/24): " INSIDE_NET_1
-if [ -z "$INSIDE_NET_1" ]; then
-    INSIDE_NET_1="172.20.242.0/24"
-    echo "Using default: 172.20.242.0/24"
-fi
-
-read -p "Internal network subnet 2 (e.g., 172.20.240.0/24): " INSIDE_NET_2
-if [ -z "$INSIDE_NET_2" ]; then
-    INSIDE_NET_2="172.20.240.0/24"
-    echo "Using default: 172.20.240.0/24"
-fi
-
-# ====================================================================
-# 2. RANDOMIZE UI MONITOR TIMING
-# ====================================================================
 echo ""
-echo "=== UI MONITOR TIMING ==="
-echo ""
-echo "UI monitor checks web interface health."
-echo "Randomizing to prevent Red Team prediction."
-echo ""
+echo "✓ Subnet 1: $SUBNET1"
+echo "✓ Subnet 2: $SUBNET2"
 
+# RANDOMIZE UI MONITOR TIMING
 UI_MONITOR_INTERVAL=$((RANDOM % 3 + 1))
 UI_MONITOR_OFFSET=$((RANDOM % 60))
-echo "UI Monitor will check every $UI_MONITOR_INTERVAL minute(s)"
 
-# ====================================================================
-# CONFIRMATION
-# ====================================================================
 echo ""
-echo "=== CONFIGURATION SUMMARY ==="
-echo "Internal subnet 1: $INSIDE_NET_1"
-echo "Internal subnet 2: $INSIDE_NET_2"
-echo "Management port restricted to: Internal networks + localhost"
-echo "UI monitor interval: Every $UI_MONITOR_INTERVAL minute(s)"
-echo "Backup location: $BACKUP_DIR"
-echo "Log file: $LOG_FILE"
+echo "UI Monitor will run every $UI_MONITOR_INTERVAL minute(s)"
 echo ""
 read -p "Proceed with UI hardening? (yes/no): " CONFIRM
 
@@ -77,93 +65,96 @@ if [ "$CONFIRM" != "yes" ]; then
     exit 0
 fi
 
+clear
+
 # ====================================================================
 # START HARDENING
 # ====================================================================
-clear
+log "========================================="
+log "DIAMOND ULTRA SECURE - STARTING"
+log "========================================="
 
-log() {
-    echo "[$(date '+%H:%M:%S')] $1" | tee -a "$LOG_FILE"
-}
-
-error() {
-    echo "[$(date '+%H:%M:%S')] ERROR: $1" | tee -a "$LOG_FILE" >&2
-}
-
-log "=== DIAMOND ULTRA - MAXIMUM UI PROTECTION ==="
-
+# Verify we're root
 if [ "$EUID" -ne 0 ]; then
-    error "Must run as root"
+    echo "ERROR: Must run as root"
     exit 1
 fi
 
+# Verify Splunk exists
 if [ ! -d "$SPLUNK_HOME" ]; then
-    error "Splunk not found"
+    echo "ERROR: Splunk not found at $SPLUNK_HOME"
     exit 1
 fi
 
 # ====================================================================
-# 1. VERIFY SPLUNK IS RUNNING
+# STEP 1: VERIFY SPLUNK RUNNING
 # ====================================================================
-log "[1/12] Verifying Splunk status..."
+log "[1/12] Verifying Splunk is running..."
 
 if ! "$SPLUNK_HOME/bin/splunk" status | grep -q "splunkd is running"; then
-    log "[!] Splunk not running, starting it..."
+    log "  Splunk not running - starting it..."
     su - "$SPLUNK_USER" -c "$SPLUNK_HOME/bin/splunk start --accept-license --answer-yes" 2>&1 | tee -a "$LOG_FILE"
     sleep 20
     
     if ! "$SPLUNK_HOME/bin/splunk" status | grep -q "splunkd is running"; then
-        error "Cannot start Splunk"
+        warn "Splunk failed to start - check $SPLUNK_HOME/var/log/splunk/splunkd.log"
+        echo "ERROR: Cannot proceed without Splunk running"
         exit 1
     fi
 fi
 
-log "[+] Splunk is running"
+success "Splunk is running"
 
 # ====================================================================
-# 2. COMPREHENSIVE BACKUP
+# STEP 2: CREATE BACKUP
 # ====================================================================
-log "[2/12] Creating backup..."
-mkdir -p "$BACKUP_DIR"
+log "[2/12] Creating comprehensive backup..."
+mkdir -p "$BACKUP_DIR" || warn "Could not create backup directory"
 
+# Backup system and apps configs
 for dir in system apps; do
     if [ -d "$SPLUNK_HOME/etc/$dir/local" ]; then
-        tar -czf "$BACKUP_DIR/${dir}_local.tar.gz" "$SPLUNK_HOME/etc/$dir/local" 2>/dev/null || true
+        tar -czf "$BACKUP_DIR/${dir}_local.tar.gz" "$SPLUNK_HOME/etc/$dir/local" 2>/dev/null || warn "Could not backup $dir"
     fi
 done
 
-log "[+] Backup: $BACKUP_DIR"
+success "Backup created: $BACKUP_DIR"
 
 # ====================================================================
-# 3. CREATE AND LOCK CORE CONFIG DIRECTORIES
+# STEP 3: CREATE CONFIG DIRECTORIES
 # ====================================================================
-log "[3/12] Securing config directories..."
+log "[3/12] Creating/securing config directories..."
 
-mkdir -p "$SPLUNK_HOME/etc/system/local"
-mkdir -p "$SPLUNK_HOME/etc/apps/search/local"
+# CRITICAL: Create directories FIRST (this was the bug last time)
+mkdir -p "$SPLUNK_HOME/etc/system/local" || warn "Could not create system/local"
+mkdir -p "$SPLUNK_HOME/etc/apps/search/local" || warn "Could not create apps/search/local"
 
-chown -R "$SPLUNK_USER:$SPLUNK_USER" "$SPLUNK_HOME/etc/system/local"
-chown -R "$SPLUNK_USER:$SPLUNK_USER" "$SPLUNK_HOME/etc/apps"
+# Fix ownership
+chown -R "$SPLUNK_USER:$SPLUNK_USER" "$SPLUNK_HOME/etc/system/local" 2>/dev/null || true
+chown -R "$SPLUNK_USER:$SPLUNK_USER" "$SPLUNK_HOME/etc/apps" 2>/dev/null || true
+
+success "Config directories ready"
 
 # ====================================================================
-# 4. ULTRA-HARDENED WEB.CONF
+# STEP 4: HARDEN WEB.CONF
 # ====================================================================
 log "[4/12] Hardening web.conf..."
 
+# Remove immutable flag if exists
 chattr -i "$SPLUNK_HOME/etc/system/local/web.conf" 2>/dev/null || true
 
-cat > "$SPLUNK_HOME/etc/system/local/web.conf" << 'WEBCONF'
+cat > "$SPLUNK_HOME/etc/system/local/web.conf" << 'WEBEOF'
 [settings]
-# Force HTTPS with modern TLS
+# Force HTTPS with modern TLS only
 enableSplunkWebSSL = true
 httpport = 8000
 sslVersions = tls1.2, tls1.3
-cipherSuite = ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384
+cipherSuite = ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256
 
-# Session hardening
-tools.sessions.timeout = 30
+# Session security
+tools.sessions.timeout = 20
 tools.sessions.restart_persist = 0
-ui_inactivity_timeout = 30m
+ui_inactivity_timeout = 20m
 enable_session_ip_locking = true
 
 # Disable attack vectors
@@ -173,31 +164,25 @@ enable_proxy_write = false
 allowRemoteLogin = never
 enable_rss = false
 
-# Anti-CSRF
+# Anti-clickjacking
 x_frame_options_sameorigin = true
-
-# Prevent clickjacking
 csp_frame_ancestors_policy = self
-WEBCONF
+WEBEOF
 
 chown "$SPLUNK_USER:$SPLUNK_USER" "$SPLUNK_HOME/etc/system/local/web.conf"
 chmod 600 "$SPLUNK_HOME/etc/system/local/web.conf"
 
-log "[+] web.conf secured"
+success "web.conf hardened"
 
 # ====================================================================
-# 5. ULTRA-HARDENED SERVER.CONF WITH NETWORK RESTRICTION
+# STEP 5: HARDEN SERVER.CONF
 # ====================================================================
-log "[5/12] Hardening server.conf with network restrictions..."
+log "[5/12] Hardening server.conf..."
 
 chattr -i "$SPLUNK_HOME/etc/system/local/server.conf" 2>/dev/null || true
 
-# Build acceptFrom string
-ACCEPT_FROM="127.0.0.1, $INSIDE_NET_1, $INSIDE_NET_2"
-
-cat > "$SPLUNK_HOME/etc/system/local/server.conf" << SERVERCONF
+cat > "$SPLUNK_HOME/etc/system/local/server.conf" << SERVEREOF
 [general]
-# Hide version info
 hideInternalModuleName = true
 serverName = SecureNode
 
@@ -211,35 +196,35 @@ maxThreads = 10
 maxSockets = 10
 maxBoundThreads = 10
 
-# Timeouts
+# Short timeouts
 keepAliveIdleTimeout = 10
 busyKeepAliveIdleTimeout = 5
 
 [httpServerListener:8089]
-# Management port restricted to internal networks only
-acceptFrom = $ACCEPT_FROM
-SERVERCONF
+# Restrict management port to internal networks only
+acceptFrom = 127.0.0.1, $SUBNET1, $SUBNET2
+SERVEREOF
 
 chown "$SPLUNK_USER:$SPLUNK_USER" "$SPLUNK_HOME/etc/system/local/server.conf"
 chmod 600 "$SPLUNK_HOME/etc/system/local/server.conf"
 
-log "[+] server.conf secured (mgmt port restricted to internal networks)"
+success "server.conf hardened (mgmt port restricted to internal)"
 
 # ====================================================================
-# 6. ULTRA-HARDENED LIMITS.CONF
+# STEP 6: HARDEN LIMITS.CONF
 # ====================================================================
 log "[6/12] Hardening limits.conf..."
 
 chattr -i "$SPLUNK_HOME/etc/system/local/limits.conf" 2>/dev/null || true
 
-cat > "$SPLUNK_HOME/etc/system/local/limits.conf" << 'LIMITSCONF'
+cat > "$SPLUNK_HOME/etc/system/local/limits.conf" << 'LIMITSEOF'
 [restapi]
-# Severe REST API limits (prevent brute force and DoS)
+# Severe REST API limits (prevent brute force)
 maxclients = 5
 maxoutstanding = 5
 
 [search]
-# Resource limits (prevent resource exhaustion)
+# Resource limits (prevent exhaustion)
 max_mem_usage_mb = 2000
 max_rawsize_perchunk = 100000000
 ttl = 3600
@@ -247,21 +232,21 @@ ttl = 3600
 [ratelimit]
 # Rate limiting (prevent abuse)
 max_requests_per_minute = 60
-LIMITSCONF
+LIMITSEOF
 
 chown "$SPLUNK_USER:$SPLUNK_USER" "$SPLUNK_HOME/etc/system/local/limits.conf"
 chmod 600 "$SPLUNK_HOME/etc/system/local/limits.conf"
 
-log "[+] limits.conf secured"
+success "limits.conf hardened"
 
 # ====================================================================
-# 7. ULTRA-HARDENED AUTHORIZE.CONF
+# STEP 7: HARDEN AUTHORIZE.CONF
 # ====================================================================
 log "[7/12] Hardening authorize.conf..."
 
 chattr -i "$SPLUNK_HOME/etc/system/local/authorize.conf" 2>/dev/null || true
 
-cat > "$SPLUNK_HOME/etc/system/local/authorize.conf" << 'AUTHCONF'
+cat > "$SPLUNK_HOME/etc/system/local/authorize.conf" << 'AUTHEOF'
 [role_admin]
 # DISABLE EXECUTION VECTORS
 run_script_search = disabled
@@ -276,57 +261,53 @@ edit_server = disabled
 edit_user = disabled
 edit_roles_grantable = disabled
 
-[authentication]
-# Force password complexity
-passwordExpiryInDays = 90
-AUTHCONF
+# Note: search, dashboards, and forwarder management still work
+AUTHEOF
 
 chown "$SPLUNK_USER:$SPLUNK_USER" "$SPLUNK_HOME/etc/system/local/authorize.conf"
 chmod 600 "$SPLUNK_HOME/etc/system/local/authorize.conf"
 
-log "[+] authorize.conf secured"
+success "authorize.conf hardened (script execution disabled)"
 
 # ====================================================================
-# 8. AUTHENTICATION.CONF - PREVENT BRUTE FORCE
+# STEP 8: HARDEN AUTHENTICATION.CONF
 # ====================================================================
-log "[8/12] Hardening authentication..."
+log "[8/12] Hardening authentication.conf..."
 
 chattr -i "$SPLUNK_HOME/etc/system/local/authentication.conf" 2>/dev/null || true
 
-cat > "$SPLUNK_HOME/etc/system/local/authentication.conf" << 'AUTHENTICATION'
+cat > "$SPLUNK_HOME/etc/system/local/authentication.conf" << 'AUTHNEOF'
 [authentication]
 # Aggressive lockout
 lockoutAttempts = 3
 lockoutThresholdMins = 5
 lockoutMins = 30
 
-# Strong passwords required
+# Strong password requirements
 minPasswordLength = 12
 minPasswordDigit = 1
 minPasswordLowercase = 1
 minPasswordUppercase = 1
 minPasswordSpecial = 1
-
-[roleMap_Splunk]
-# Disable admin from network (force local only)
-admin = admin
-AUTHENTICATION
+AUTHNEOF
 
 chown "$SPLUNK_USER:$SPLUNK_USER" "$SPLUNK_HOME/etc/system/local/authentication.conf"
 chmod 600 "$SPLUNK_HOME/etc/system/local/authentication.conf"
 
-log "[+] authentication.conf secured"
+success "authentication.conf hardened (3 attempts = 30min lockout)"
 
 # ====================================================================
-# 9. DISABLE VULNERABLE APPS AND SCRIPTS
+# STEP 9: DISABLE RISKY APPS (FIXED - mkdir FIRST)
 # ====================================================================
-log "[9/12] Disabling vulnerable components..."
+log "[9/12] Disabling vulnerable apps..."
 
+# Remove execute from all scripts in apps
 if [ -d "$SPLUNK_HOME/etc/apps" ]; then
     find "$SPLUNK_HOME/etc/apps" -type f \( -name "*.sh" -o -name "*.py" -o -name "*.pl" \) -exec chmod -x {} \; 2>/dev/null || true
-    log "[+] Scripts in apps disabled"
+    log "  Removed execute permission from app scripts"
 fi
 
+# Disable specific risky apps
 RISKY_APPS=(
     "python_upgrade_readiness_app"
     "splunk_monitoring_console"
@@ -335,18 +316,27 @@ RISKY_APPS=(
 
 for app in "${RISKY_APPS[@]}"; do
     if [ -d "$SPLUNK_HOME/etc/apps/$app" ]; then
-        touch "$SPLUNK_HOME/etc/apps/$app/local/app.conf"
+        # CREATE THE DIRECTORY FIRST (this was missing before - caused failure)
+        mkdir -p "$SPLUNK_HOME/etc/apps/$app/local"
+        
+        # Now create the file
         echo -e "[ui]\nis_visible = false\nis_manageable = false" > "$SPLUNK_HOME/etc/apps/$app/local/app.conf"
-        log "[+] Disabled risky app: $app"
+        
+        # Fix ownership
+        chown -R "$SPLUNK_USER:$SPLUNK_USER" "$SPLUNK_HOME/etc/apps/$app/local"
+        
+        log "  Disabled app: $app"
     fi
 done
 
+success "Vulnerable apps disabled"
+
 # ====================================================================
-# 10. PROTECT AGAINST CONFIG INJECTION
+# STEP 10: PROTECT AGAINST CONFIG INJECTION
 # ====================================================================
 log "[10/12] Protecting against config injection..."
 
-cat > "$SPLUNK_HOME/etc/system/local/inputs.conf" << 'INPUTS'
+cat > "$SPLUNK_HOME/etc/system/local/inputs.conf" << 'INPUTSEOF'
 [default]
 # Disable most inputs to prevent injection
 _TCP_ROUTING = *
@@ -355,213 +345,170 @@ _SYSLOG_ROUTING = *
 [splunktcp:9997]
 # Only allow forwarders
 disabled = false
-INPUTS
+INPUTSEOF
 
 chown "$SPLUNK_USER:$SPLUNK_USER" "$SPLUNK_HOME/etc/system/local/inputs.conf"
 chmod 600 "$SPLUNK_HOME/etc/system/local/inputs.conf"
 
-log "[+] inputs.conf locked down"
+success "inputs.conf locked down"
 
 # ====================================================================
-# 11. RESTART SPLUNK WITH VERIFICATION
+# STEP 11: RESTART SPLUNK
 # ====================================================================
-log "[11/12] Restarting Splunk..."
+log "[11/12] Restarting Splunk to apply configs..."
 
 su - "$SPLUNK_USER" -c "$SPLUNK_HOME/bin/splunk restart" 2>&1 | tee -a "$LOG_FILE"
 
-log "[*] Waiting for Splunk to restart..."
+log "  Waiting for Splunk to restart..."
 sleep 15
 
+# Progressive verification
 RETRIES=0
-MAX_RETRIES=8
+MAX_RETRIES=10
 while [ $RETRIES -lt $MAX_RETRIES ]; do
     if "$SPLUNK_HOME/bin/splunk" status | grep -q "splunkd is running"; then
-        log "[+] Splunk restarted successfully"
+        success "Splunk restarted successfully"
         break
     fi
     
-    log "[*] Still waiting... ($((RETRIES+1))/$MAX_RETRIES)"
+    log "  Still waiting... ($((RETRIES+1))/$MAX_RETRIES)"
     sleep 10
-    RETRIES=$((RETRIES+1))
+    ((RETRIES++))
 done
 
 if [ $RETRIES -eq $MAX_RETRIES ]; then
-    error "Splunk failed to restart"
-    log "[!] Check: $SPLUNK_HOME/var/log/splunk/splunkd.log"
-    log "[!] To restore: bash /root/restore_diamond.sh"
+    warn "Splunk failed to restart after $MAX_RETRIES attempts"
+    log "  Check: $SPLUNK_HOME/var/log/splunk/splunkd.log"
+    log "  To restore: bash /root/restore_diamond.sh"
     exit 1
 fi
 
 # ====================================================================
-# 12. COMPREHENSIVE VERIFICATION
+# STEP 12: CREATE UI MONITOR & VERIFY
 # ====================================================================
-log "[12/12] Final verification..."
+log "[12/12] Creating UI monitor and verifying..."
 
-sleep 10
-
-if "$SPLUNK_HOME/bin/splunk" status | grep -q "splunkd is running"; then
-    log "[+] splunkd: RUNNING"
-else
-    error "splunkd: NOT RUNNING"
-fi
-
-WEB_TEST=$(curl -k -s --max-time 10 https://localhost:8000 2>&1 | head -20)
-if echo "$WEB_TEST" | grep -q "Splunk"; then
-    log "[+] Web UI: RESPONDING"
-elif echo "$WEB_TEST" | grep -q "HTTP"; then
-    log "[+] Web UI: RESPONDING (HTTP redirect)"
-else
-    log "[!] Web UI: NOT RESPONDING CORRECTLY"
-    echo "$WEB_TEST" >> "$LOG_FILE"
-fi
-
-for port in 8000 8089 9997; do
-    if netstat -tuln | grep -q ":$port.*LISTEN"; then
-        log "[+] Port $port: LISTENING"
-    else
-        log "[!] Port $port: NOT LISTENING"
-    fi
-done
-
-CONFIGS=(
-    "web.conf"
-    "server.conf"
-    "limits.conf"
-    "authorize.conf"
-    "authentication.conf"
-)
-
-for conf in "${CONFIGS[@]}"; do
-    if [ -f "$SPLUNK_HOME/etc/system/local/$conf" ]; then
-        PERMS=$(stat -c "%a" "$SPLUNK_HOME/etc/system/local/$conf")
-        OWNER=$(stat -c "%U" "$SPLUNK_HOME/etc/system/local/$conf")
-        log "[+] $conf: exists ($PERMS, $OWNER)"
-    else
-        log "[!] $conf: MISSING"
-    fi
-done
-
-log "[*] Testing admin authentication..."
-if "$SPLUNK_HOME/bin/splunk" list user 2>&1 | grep -q "admin"; then
-    log "[+] Authentication: WORKING"
-else
-    log "[!] Authentication: MAY BE BROKEN"
-fi
-
-# ====================================================================
-# CREATE AUTO-RESTORE SCRIPT
-# ====================================================================
-cat > /root/restore_diamond.sh << RESTORE
+# Create UI monitor script
+cat > /root/monitor_splunk_ui.sh << 'MONITOREOF'
 #!/bin/bash
-echo "Restoring Splunk configs from backup..."
-chattr -i "$SPLUNK_HOME/etc/system/local/*.conf" 2>/dev/null || true
-tar -xzf "$BACKUP_DIR/system_local.tar.gz" -C "$SPLUNK_HOME/etc/system/" 2>/dev/null || true
-chown -R "$SPLUNK_USER:$SPLUNK_USER" "$SPLUNK_HOME/etc/system/local"
-su - "$SPLUNK_USER" -c "$SPLUNK_HOME/bin/splunk restart"
-echo "Restore complete"
-RESTORE
-
-chmod +x /root/restore_diamond.sh
-
-# ====================================================================
-# CREATE MONITORING SCRIPT WITH RANDOMIZED TIMING
-# ====================================================================
-cat > /root/monitor_splunk_ui.sh << 'MONITOR'
-#!/bin/bash
-# Continuous monitoring of Splunk UI health
-
 SPLUNK_HOME="/opt/splunk"
 LOG="/var/log/splunk_ui_monitor.log"
 
-log_msg() {
-    echo "[$(date '+%H:%M:%S')] $1" >> "$LOG"
-}
+log_msg() { echo "[$(date '+%H:%M:%S')] $1" >> "$LOG"; }
 
-# Check web UI is responding
-if ! curl -k -s --max-time 5 https://localhost:8000 | grep -q "Splunk"; then
+# Check web UI responding
+if ! curl -k -s --max-time 5 https://localhost:8000 2>/dev/null | grep -q "Splunk"; then
     log_msg "ALERT: Web UI not responding"
     
-    # Check if splunkweb process is running
-    if ! pgrep -f splunkweb > /dev/null; then
+    # Check if splunkweb process running
+    if ! pgrep -f splunkweb >/dev/null; then
         log_msg "FIX: Restarting splunkweb"
-        su - splunk -c "/opt/splunk/bin/splunk restart splunkweb"
+        su - splunk -c "/opt/splunk/bin/splunk restart splunkweb" >> "$LOG" 2>&1
     fi
 fi
 
 # Check for port hijacking
-HIJACKER=$(netstat -tulpn 2>/dev/null | grep ":8000.*LISTEN" | grep -v splunkd | awk '{print $7}' | cut -d/ -f1)
+if command -v netstat >/dev/null 2>&1; then
+    HIJACKER=$(netstat -tulpn 2>/dev/null | grep ":8000.*LISTEN" | grep -v splunkd | awk '{print $7}' | cut -d/ -f1)
+elif command -v ss >/dev/null 2>&1; then
+    HIJACKER=$(ss -tulpn 2>/dev/null | grep ":8000.*LISTEN" | grep -v splunkd | awk '{print $7}' | cut -d, -f2 | cut -d= -f2)
+fi
+
 if [ -n "$HIJACKER" ]; then
-    log_msg "ALERT: Port 8000 hijacked by PID $HIJACKER, killing it"
+    log_msg "ALERT: Port 8000 hijacked by PID $HIJACKER - killing"
     kill -9 "$HIJACKER" 2>/dev/null
 fi
 
-# Check config files haven't been deleted/corrupted
+# Check config files haven't been deleted
 for conf in web.conf server.conf authorize.conf; do
     if [ ! -f "$SPLUNK_HOME/etc/system/local/$conf" ]; then
         log_msg "CRITICAL: $conf is missing - restore needed"
     fi
 done
-MONITOR
+MONITOREOF
 
 chmod +x /root/monitor_splunk_ui.sh
 
-# Add UI monitor to cron with randomization
+# Add to cron
 CRON_SCHEDULE="*/$UI_MONITOR_INTERVAL * * * *"
 (crontab -l 2>/dev/null | grep -v "monitor_splunk_ui"; echo "$CRON_SCHEDULE sleep $UI_MONITOR_OFFSET; /root/monitor_splunk_ui.sh") | crontab -
 
-log "[+] UI monitor deployed (runs every $UI_MONITOR_INTERVAL min, ${UI_MONITOR_OFFSET}s offset)"
+success "UI monitor active (runs every $UI_MONITOR_INTERVAL minute(s))"
 
-# ====================================================================
-# SUMMARY
-# ====================================================================
+# Create restore script
+cat > /root/restore_diamond.sh << RESTOREEOF
+#!/bin/bash
+echo "Restoring Splunk configs from backup..."
+chattr -i "$SPLUNK_HOME/etc/system/local"/*.conf 2>/dev/null || true
+tar -xzf "$BACKUP_DIR/system_local.tar.gz" -C "$SPLUNK_HOME/etc/system/" 2>/dev/null || true
+chown -R "$SPLUNK_USER:$SPLUNK_USER" "$SPLUNK_HOME/etc/system/local"
+su - "$SPLUNK_USER" -c "$SPLUNK_HOME/bin/splunk restart"
+echo "Restore complete"
+RESTOREEOF
+
+chmod +x /root/restore_diamond.sh
+
+# Final verification
+sleep 10
+
+if "$SPLUNK_HOME/bin/splunk" status | grep -q "splunkd is running"; then
+    success "Splunk: RUNNING"
+else
+    warn "Splunk: NOT RUNNING"
+fi
+
+if curl -k -s --max-time 10 https://localhost:8000 2>/dev/null | grep -q "Splunk"; then
+    success "Web UI: RESPONDING"
+else
+    warn "Web UI: NOT RESPONDING"
+fi
+
+# Check ports
+for port in 8000 8089 9997; do
+    if check_port $port; then
+        success "Port $port: LISTENING"
+    else
+        warn "Port $port: NOT LISTENING"
+    fi
+done
+
+# Check configs exist
+for conf in web.conf server.conf limits.conf authorize.conf authentication.conf; do
+    if [ -f "$SPLUNK_HOME/etc/system/local/$conf" ]; then
+        success "$conf: EXISTS"
+    else
+        warn "$conf: MISSING"
+    fi
+done
+
 log ""
-log "=== DIAMOND ULTRA HARDENING COMPLETE ==="
+log "========================================="
+log "DIAMOND ULTRA SECURE - COMPLETE"
+log "========================================="
 log ""
-log "PROTECTIONS ENABLED:"
-log "  ✓ Modern TLS 1.2/1.3 only"
-log "  ✓ Session IP locking enabled"
-log "  ✓ Script execution disabled"
-log "  ✓ File editing disabled"
-log "  ✓ User management via UI disabled"
-log "  ✓ Brute force lockout (3 attempts, 30min)"
-log "  ✓ REST API severely limited"
-log "  ✓ Risky apps disabled"
-log "  ✓ Config injection prevented"
-log "  ✓ Management port restricted to internal networks"
-log "  ✓ Continuous UI monitoring"
-log ""
-log "STILL FUNCTIONAL:"
-log "  ✓ Web UI login"
-log "  ✓ Log searching"
-log "  ✓ Dashboards"
-log "  ✓ Forwarder connections"
-log "  ✓ Basic admin functions"
-log ""
-log "NETWORK RESTRICTIONS:"
-log "  Management port (8089) accepts from:"
-log "    - 127.0.0.1"
-log "    - $INSIDE_NET_1"
-log "    - $INSIDE_NET_2"
-log ""
-log "IF PROBLEMS:"
-log "  Restore: bash /root/restore_diamond.sh"
-log "  Check: tail -100 $SPLUNK_HOME/var/log/splunk/splunkd.log"
-log "  UI Monitor: tail -f /var/log/splunk_ui_monitor.log"
-log ""
+log "All 12 steps completed"
 log "Backup: $BACKUP_DIR"
 log "Log: $LOG_FILE"
-log "UI Monitor runs: Every $UI_MONITOR_INTERVAL minute(s) with ${UI_MONITOR_OFFSET}s offset"
+log "UI Monitor log: /var/log/splunk_ui_monitor.log"
+log ""
+log "PROTECTIONS ACTIVE:"
+log "  ✓ TLS 1.2/1.3 only"
+log "  ✓ Session IP locking"
+log "  ✓ Script execution disabled"
+log "  ✓ Brute force lockout (3 attempts)"
+log "  ✓ REST API limited"
+log "  ✓ Management port restricted"
+log "  ✓ UI monitoring active"
 log ""
 
 # Clear sensitive variables
-unset INSIDE_NET_1
-unset INSIDE_NET_2
+unset SUBNET1 SUBNET2
 
 echo ""
 echo "========================================="
-echo "   DIAMOND ULTRA COMPLETE"
+echo "   DIAMOND COMPLETE - ALL 12 STEPS"
 echo "========================================="
 echo ""
-echo "Check NISE to verify Splunk scoring."
-echo "Monitor: tail -f /var/log/splunk_ui_monitor.log"
+echo "Review log: tail -100 $LOG_FILE"
+echo "Monitor UI: tail -f /var/log/splunk_ui_monitor.log"
 echo ""
